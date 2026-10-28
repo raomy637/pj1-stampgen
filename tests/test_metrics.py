@@ -109,3 +109,82 @@ def test_resolve_curve_auto_for_dense_font(face, spec):
     if not face.is_dense_outline:
         pytest.skip("该字体不是密集轮廓")
     assert metrics.resolve_curve(face, spec) == metrics.CURVE_DENSE
+
+
+# ---------------- 固定字号模式（auto）----------------
+
+
+def test_fit_auto_keeps_requested_size(metrics_of, spec):
+    """字高装得下就必须保留用户给的字号，不能按 edge 余量偷偷压小。
+
+    旧版一直是"字号 = 底座宽"这种贴边用法，字高通常略小于底座宽就能打印。
+    这里若按 edge_mm=0.2 的舒适余量去压，成品就和旧版对不上了。
+    """
+    spec.width_mode = "auto"
+    spec.auto_size_mm = 6.0
+    # 底座宽度按该字体的实际字高给（不同字体字高比不同，不能写死 6.0）
+    spec.base_width_mm = metrics.cap_height_mm(metrics_of, 6.0) + 0.1
+
+    fit = metrics.fit_auto(metrics_of, "BELLA", spec)
+    assert fit.size_mm == pytest.approx(6.0)
+    assert fit.status == "ok"
+    assert metrics.cap_height_mm(metrics_of, fit.size_mm) <= spec.base_width_mm
+
+
+def test_fit_auto_caps_when_base_too_narrow(metrics_of):
+    spec = StampSpec(width_mode="auto", auto_size_mm=9.0, base_width_mm=6.0)
+    fit = metrics.fit_auto(metrics_of, "BELLA", spec)
+    assert fit.status == "size_capped"
+    assert fit.size_mm < 9.0
+    # 提示必须告诉用户把底座加宽到多少才能用回原字号
+    assert any("底座宽度加到" in n for n in fit.notes)
+
+
+def test_fit_auto_size_stays_constant_across_names(metrics_of, spec):
+    spec.width_mode = "auto"
+    short = metrics.fit_auto(metrics_of, "AVA", spec)
+    long = metrics.fit_auto(metrics_of, "GRACIE", spec)
+    assert short.size_mm == pytest.approx(long.size_mm)
+    assert long.base_len_mm > short.base_len_mm
+
+
+def test_fit_auto_spacing_and_weight_widen(metrics_of, spec):
+    spec.width_mode = "auto"
+    spec.auto_spacing = 1.0
+    base = metrics.fit_auto(metrics_of, "BELLA", spec).width_mm
+
+    spec.auto_spacing = 1.4
+    wider = metrics.fit_auto(metrics_of, "BELLA", spec).width_mm
+    assert wider > base
+
+    spec.auto_spacing = 1.0
+    spec.weight_offset_mm = 0.2
+    bold = metrics.fit_auto(metrics_of, "BELLA", spec).width_mm
+    assert bold - base == pytest.approx(0.4, abs=1e-6)
+
+
+def test_fit_auto_margin_widens_base(metrics_of, spec):
+    spec.width_mode = "auto"
+    spec.margin_mm = 1.5
+    tight = metrics.fit_auto(metrics_of, "BELLA", spec).base_len_mm
+    spec.margin_mm = 6.0
+    loose = metrics.fit_auto(metrics_of, "BELLA", spec).base_len_mm
+    assert loose - tight == pytest.approx(9.0)
+
+
+def test_fit_auto_rejects_missing_glyph(metrics_of, spec):
+    spec.width_mode = "auto"
+    fit = metrics.fit_auto(metrics_of, "名字", spec)
+    assert fit.status == "missing_glyph"
+    assert not fit.ok
+
+
+def test_fit_auto_empty(metrics_of, spec):
+    spec.width_mode = "auto"
+    assert metrics.fit_auto(metrics_of, "  ", spec).status == "empty"
+
+
+def test_fit_sets_base_len_to_target(metrics_of, spec):
+    """fixed 模式下底座长度恒等于目标宽度。"""
+    fit = metrics.fit(metrics_of, "BELLA", spec)
+    assert fit.base_len_mm == pytest.approx(spec.target_width_mm)

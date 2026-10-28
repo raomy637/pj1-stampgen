@@ -22,6 +22,14 @@ def _apply_overrides(cfg: AppConfig, args: argparse.Namespace) -> AppConfig:
         cfg.font_style = args.style
     if getattr(args, "width", None) is not None:
         cfg.spec.target_width_mm = args.width
+    if getattr(args, "mode", None):
+        cfg.spec.width_mode = args.mode
+    if getattr(args, "size", None) is not None:
+        cfg.spec.auto_size_mm = args.size
+    if getattr(args, "spacing", None) is not None:
+        cfg.spec.auto_spacing = args.spacing
+    if getattr(args, "workers", None) is not None:
+        cfg.workers = args.workers
     if getattr(args, "margin", None) is not None:
         cfg.spec.margin_mm = args.margin
     if getattr(args, "min_size", None) is not None:
@@ -105,23 +113,40 @@ def cmd_fit(args: argparse.Namespace) -> int:
     names = _read_names(Path(args.names)) if args.names else ["BELLA", "AVA", "GRACIE"]
     spec = cfg.spec
     curve = metrics.resolve_curve(face, spec)
-    print(
-        f"字体 {face.label} | 目标宽度 {spec.target_width_mm}mm | "
-        f"可用 {spec.available_mm():.2f}mm | 精度 $fa={curve[0]:g} $fs={curve[1]:g}\n"
-    )
-    print(f"{'名字':<18}{'字号':>7}{'间距':>7}{'估算宽':>9}{'填充率':>9}  状态")
+    auto = spec.is_auto_width()
+
+    if auto:
+        print(
+            f"字体 {face.label} | 模式 固定字号 {spec.auto_size_mm:g}mm / 间距 {spec.auto_spacing:g}"
+            f" | 精度 $fa={curve[0]:g} $fs={curve[1]:g}\n"
+        )
+        print(f"{'名字':<18}{'字号':>7}{'间距':>7}{'文字宽':>9}{'底座长':>9}  状态")
+    else:
+        print(
+            f"字体 {face.label} | 目标宽度 {spec.target_width_mm}mm | "
+            f"可用 {spec.available_mm():.2f}mm | 精度 $fa={curve[0]:g} $fs={curve[1]:g}\n"
+        )
+        print(f"{'名字':<18}{'字号':>7}{'间距':>7}{'估算宽':>9}{'填充率':>9}  状态")
+
     issues = validate.validate_batch(names, fm, spec)
     for name in names:
-        fit = metrics.fit(fm, name, spec)
+        fit = metrics.fit_auto(fm, name, spec) if auto else metrics.fit(fm, name, spec)
         bad = validate.blocking_issues(issues.get(name, []))
         note = validate.format_issues(bad) if bad else "；".join(fit.notes) or fit.status
-        print(
-            f"{name:<18}{fit.size_mm:>7.2f}{fit.spacing:>7.2f}"
-            f"{fit.width_mm:>9.2f}{fit.fill_ratio * 100:>8.0f}%  {note}"
-        )
+        if auto:
+            print(
+                f"{name:<18}{fit.size_mm:>7.2f}{fit.spacing:>7.2f}"
+                f"{fit.width_mm:>9.2f}{fit.base_len_mm:>9.2f}  {note}"
+            )
+        else:
+            print(
+                f"{name:<18}{fit.size_mm:>7.2f}{fit.spacing:>7.2f}"
+                f"{fit.width_mm:>9.2f}{fit.fill_ratio * 100:>8.0f}%  {note}"
+            )
+
     print(
-        "\n说明：估算宽是纯解析结果（不解析 GPOS 字偶距），对 AV/VA 这类紧排字母会偏大 1mm 左右；"
-        "\n      实际生成时每个名字会先做一次实测探针校准，成品宽度以实测为准。"
+        "\n说明：以上是纯解析结果（不解析 GPOS 字偶距），对 AV/VA 这类紧排字母会偏大 1mm 左右；"
+        "\n      实际生成时每个名字会先做一次实测探针校准，成品尺寸以实测为准。"
     )
     return 0
 
@@ -178,7 +203,21 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--template", default=None, help="stamp_template.scad 路径")
         p.add_argument("--font", default=None, help="字体族名")
         p.add_argument("--style", default=None, help="字体样式，如 Regular / Bold")
-        p.add_argument("--width", type=float, default=None, help="目标底座长度（毫米）")
+        p.add_argument("--width", type=float, default=None, help="目标底座长度（毫米，fixed 模式）")
+        p.add_argument(
+            "--mode",
+            choices=["fixed", "auto"],
+            default=None,
+            help="fixed=定宽自适应字号（默认）；auto=定字号自适应宽度",
+        )
+        p.add_argument("--size", type=float, default=None, help="auto 模式的固定字号（毫米）")
+        p.add_argument("--spacing", type=float, default=None, help="auto 模式的字间距，1.0 为原字距")
+        p.add_argument(
+            "--workers",
+            type=int,
+            default=None,
+            help="并发渲染数，0 或省略=按 CPU 核数自动（封顶 4）",
+        )
         p.add_argument("--margin", type=float, default=None, help="文字单边留白（毫米）")
         p.add_argument("--min-size", type=float, default=None, help="最小字号")
         p.add_argument("--max-size", type=float, default=None, help="最大字号")

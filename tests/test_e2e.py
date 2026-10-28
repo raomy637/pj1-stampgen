@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 
 import pytest
@@ -17,7 +18,8 @@ from stampgen.template import RenderParams
 @pytest.fixture()
 def cfg(face) -> AppConfig:
     cfg = AppConfig(font_family=face.family, font_style=face.style)
-    cfg.spec = StampSpec(target_width_mm=30.0)
+    # 这批用例验证的是"定宽自适应字号"，显式声明模式，别依赖默认值
+    cfg.spec = StampSpec(width_mode="fixed", target_width_mm=30.0)
     return cfg
 
 
@@ -78,3 +80,47 @@ def test_derive_output_dir():
     # 纯 names.txt 不应变成 output_stlnames
     assert batch.derive_output_dir("names.txt", "D:/x").name == "output_stl"
     assert batch.derive_output_dir("Names.TXT", "D:/x").name == "output_stl"
+
+
+def test_resolve_workers():
+    assert batch.resolve_workers(0, 10) == min(4, os.cpu_count() or 1)
+    assert batch.resolve_workers(2, 10) == 2
+    assert batch.resolve_workers(99, 3) == 3  # 不超过任务数
+    assert batch.resolve_workers(0, 0) == 1
+
+
+def test_batch_auto_mode_varies_base_length(
+    tmp_path, face, library, openscad_exe, metrics_of
+):
+    """固定字号模式下：字号一致、底座长度随名字变，且实测底座与预测一致。"""
+    cfg = AppConfig(font_family=face.family, font_style=face.style)
+    cfg.spec = StampSpec(
+        width_mode="auto",
+        auto_size_mm=6.0,
+        auto_spacing=1.0,
+        base_width_mm=metrics.cap_height_mm(metrics_of, 6.0) + 0.1,
+    )
+    report = batch.run_batch(cfg, ["AVA", "BELLA"], tmp_path / "auto", library=library)
+    assert report.generated == 2, [r.message for r in report.results]
+
+    ava = next(r for r in report.results if r.name == "AVA")
+    bella = next(r for r in report.results if r.name == "BELLA")
+    assert ava.size_mm == pytest.approx(bella.size_mm)
+    assert bella.base_len > ava.base_len
+
+    stats = openscad.stl_stats(tmp_path / "auto" / "BELLA.stl")
+    assert stats.width == pytest.approx(bella.base_len, abs=0.05)
+
+
+def test_batch_parallel_matches_serial(tmp_path, cfg, library):
+    """并发不能改变结果：顺序、数量、成品宽度都要和串行一致。"""
+    names = ["BELLA", "AVA", "GRACIE"]
+    cfg.workers = 1
+    serial = batch.run_batch(cfg, names, tmp_path / "s", library=library)
+    cfg.workers = 3
+    parallel = batch.run_batch(cfg, names, tmp_path / "p", library=library)
+
+    assert [r.name for r in serial.results] == [r.name for r in parallel.results]
+    assert parallel.generated == serial.generated
+    for a, b in zip(serial.results, parallel.results):
+        assert a.measured_width == pytest.approx(b.measured_width, abs=0.05)

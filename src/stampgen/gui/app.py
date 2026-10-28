@@ -76,7 +76,10 @@ class StampApp:
         spec = self.cfg.spec
         self.var_family = tk.StringVar()
         self.var_style = tk.StringVar()
+        self.var_mode = tk.StringVar(value=spec.width_mode)
         self.var_width = tk.StringVar(value=f"{spec.target_width_mm:g}")
+        self.var_auto_size = tk.StringVar(value=f"{spec.auto_size_mm:g}")
+        self.var_auto_spacing = tk.StringVar(value=f"{spec.auto_spacing:g}")
         self.var_margin = tk.StringVar(value=f"{spec.margin_mm:g}")
         self.var_min_size = tk.StringVar(value=f"{spec.min_size_mm:g}")
         self.var_max_size = tk.StringVar(value=f"{spec.max_size_mm:g}")
@@ -84,6 +87,9 @@ class StampApp:
         self.var_base_w = tk.StringVar(value=f"{spec.base_width_mm:g}")
         self.var_base_h = tk.StringVar(value=f"{spec.base_height_mm:g}")
         self.var_letter_h = tk.StringVar(value=f"{spec.letter_height_mm:g}")
+        self.var_workers = tk.StringVar(
+            value="" if not self.cfg.workers else str(self.cfg.workers)
+        )
         self.var_names = tk.StringVar()
         self.var_outroot = tk.StringVar()
         self.var_status = tk.StringVar(value="就绪")
@@ -136,42 +142,101 @@ class StampApp:
         spin_weight.grid(row=0, column=5, sticky="w", pady=4)
         spin_weight.bind("<FocusOut>", lambda _e: self._schedule_preview())
 
-        ttk.Label(box, text="目标宽度 mm").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=4)
-        ent_width = ttk.Entry(box, textvariable=self.var_width)
-        ent_width.grid(row=1, column=1, sticky="we", pady=4)
-        ent_width.bind("<FocusOut>", lambda _e: self._schedule_preview())
+        ttk.Label(box, text="宽度模式").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=4)
+        mode_box = ttk.Frame(box)
+        mode_box.grid(row=1, column=1, columnspan=5, sticky="w", pady=4)
+        ttk.Radiobutton(
+            mode_box,
+            text="固定字号 → 自适应宽度（字一样大，底座随名字变）",
+            value="auto",
+            variable=self.var_mode,
+            command=self._on_mode_change,
+        ).pack(side="left")
+        ttk.Radiobutton(
+            mode_box,
+            text="固定宽度 → 自适应字号（成品一样宽）",
+            value="fixed",
+            variable=self.var_mode,
+            command=self._on_mode_change,
+        ).pack(side="left", padx=(18, 0))
 
-        ttk.Label(box, text="左右留白 mm").grid(row=1, column=2, sticky="e", padx=(14, 6), pady=4)
+        ttk.Label(box, text="目标宽度 mm").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=4)
+        self.ent_width = ttk.Entry(box, textvariable=self.var_width)
+        self.ent_width.grid(row=2, column=1, sticky="we", pady=4)
+        self.ent_width.bind("<FocusOut>", lambda _e: self._schedule_preview())
+
+        ttk.Label(box, text="固定字号 mm").grid(row=2, column=2, sticky="e", padx=(14, 6), pady=4)
+        self.ent_auto_size = ttk.Entry(box, textvariable=self.var_auto_size)
+        self.ent_auto_size.grid(row=2, column=3, sticky="we", pady=4)
+        self.ent_auto_size.bind("<FocusOut>", lambda _e: self._schedule_preview())
+
+        ttk.Label(box, text="字间距").grid(row=2, column=4, sticky="e", padx=(14, 6), pady=4)
+        self.ent_auto_spacing = ttk.Entry(box, textvariable=self.var_auto_spacing)
+        self.ent_auto_spacing.grid(row=2, column=5, sticky="we", pady=4)
+        self.ent_auto_spacing.bind("<FocusOut>", lambda _e: self._schedule_preview())
+
+        ttk.Label(box, text="左右留白 mm").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=4)
         ent_margin = ttk.Entry(box, textvariable=self.var_margin)
-        ent_margin.grid(row=1, column=3, sticky="we", pady=4)
+        ent_margin.grid(row=3, column=1, sticky="we", pady=4)
         ent_margin.bind("<FocusOut>", lambda _e: self._schedule_preview())
 
-        ttk.Label(box, text="字号范围 mm").grid(row=1, column=4, sticky="e", padx=(14, 6), pady=4)
-        range_box = ttk.Frame(box)
-        range_box.grid(row=1, column=5, sticky="we", pady=4)
-        e_min = ttk.Entry(range_box, textvariable=self.var_min_size, width=6)
-        e_min.pack(side="left")
-        ttk.Label(range_box, text=" ~ ").pack(side="left")
-        e_max = ttk.Entry(range_box, textvariable=self.var_max_size, width=6)
-        e_max.pack(side="left")
-        for w in (e_min, e_max):
-            w.bind("<FocusOut>", lambda _e: self._schedule_preview())
+        ttk.Label(box, text="字号范围 mm").grid(row=3, column=2, sticky="e", padx=(14, 6), pady=4)
+        self.range_box = ttk.Frame(box)
+        self.range_box.grid(row=3, column=3, sticky="we", pady=4)
+        self.ent_min_size = ttk.Entry(self.range_box, textvariable=self.var_min_size, width=6)
+        self.ent_min_size.pack(side="left")
+        ttk.Label(self.range_box, text=" ~ ").pack(side="left")
+        self.ent_max_size = ttk.Entry(self.range_box, textvariable=self.var_max_size, width=6)
+        self.ent_max_size.pack(side="left")
+        for widget in (self.ent_min_size, self.ent_max_size):
+            widget.bind("<FocusOut>", lambda _e: self._schedule_preview())
 
-        ttk.Label(box, text="底座 宽/高/字高").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=4)
+        ttk.Label(box, text="底座 宽/高/字高").grid(row=3, column=4, sticky="e", padx=(14, 6), pady=4)
         base_box = ttk.Frame(box)
-        base_box.grid(row=2, column=1, sticky="we", pady=4)
+        base_box.grid(row=3, column=5, sticky="we", pady=4)
         for var in (self.var_base_w, self.var_base_h, self.var_letter_h):
             ent = ttk.Entry(base_box, textvariable=var, width=7)
             ent.pack(side="left", padx=(0, 4))
             ent.bind("<FocusOut>", lambda _e: self._schedule_preview())
 
-        self.lbl_hint = ttk.Label(
+        ttk.Label(box, text="同时生成").grid(row=4, column=0, sticky="w", padx=(0, 6), pady=4)
+        self.spin_workers = ttk.Spinbox(
             box,
-            text="字号上限会同时受「底座宽度」约束：字高不得超过底座宽，否则字母会悬空。",
-            foreground=COLOR_MUTED,
+            textvariable=self.var_workers,
+            from_=0,
+            to=16,
+            increment=1,
+            width=8,
         )
-        self.lbl_hint.grid(row=2, column=2, columnspan=4, sticky="w", padx=(14, 0), pady=4)
+        self.spin_workers.grid(row=4, column=1, sticky="w", pady=4)
+        self.spin_workers.bind("<FocusOut>", lambda _e: self._schedule_preview())
+
+        self.lbl_hint = ttk.Label(box, text="", foreground=COLOR_MUTED, wraplength=520, justify="left")
+        self.lbl_hint.grid(row=4, column=2, columnspan=4, sticky="w", padx=(14, 0), pady=4)
+
+        self._on_mode_change(quiet=True)
         return box
+
+    def _on_mode_change(self, quiet: bool = False) -> None:
+        """按当前宽度模式启用/禁用对应的输入框。"""
+        auto = self.var_mode.get() == "auto"
+        normal, disabled = "normal", "disabled"
+        self.ent_width.configure(state=disabled if auto else normal)
+        self.ent_auto_size.configure(state=normal if auto else disabled)
+        self.ent_auto_spacing.configure(state=normal if auto else disabled)
+        # 字号范围只在 fixed 模式下参与求解；auto 模式字号是直接指定的
+        for widget in (self.ent_min_size, self.ent_max_size):
+            widget.configure(state=disabled if auto else normal)
+        if auto:
+            self.lbl_hint.configure(
+                text="字号固定，底座长度按每个名字的实测字宽自动算（字高不得超过底座宽）。"
+            )
+        else:
+            self.lbl_hint.configure(
+                text="字号上限同时受「底座宽度」约束：字高不得超过底座宽，否则字母会悬空。"
+            )
+        if not quiet:
+            self._schedule_preview()
 
     def _build_files(self, parent: ttk.Frame) -> ttk.Widget:
         box = ttk.Frame(parent)
@@ -225,7 +290,7 @@ class StampApp:
         ttk.Button(bar, text="打开输出目录", command=self.open_output).pack(side="left", padx=(8, 0))
         ttk.Button(bar, text="清空日志", command=self.clear_log).pack(side="left", padx=(8, 0))
 
-        self.progress = ttk.Progressbar(bar, mode="determinate", length=220)
+        self.progress = ttk.Progressbar(bar, mode="determinate", length=170)
         self.progress.pack(side="right")
         ttk.Label(bar, textvariable=self.var_status, foreground=COLOR_MUTED).pack(
             side="right", padx=(0, 10)
@@ -236,15 +301,15 @@ class StampApp:
         paned = ttk.Panedwindow(parent, orient=tk.VERTICAL)
 
         preview_box = ttk.LabelFrame(paned, text=" 拟合预览 ", padding=(8, 6))
-        cols = ("name", "chars", "size", "spacing", "width", "fill", "status")
+        cols = ("name", "chars", "size", "spacing", "text_w", "base_len", "status")
         headings = {
-            "name": ("名字", 160),
+            "name": ("名字", 150),
             "chars": ("字符", 50),
-            "size": ("字号", 70),
-            "spacing": ("间距", 70),
-            "width": ("估算宽", 80),
-            "fill": ("填充率", 70),
-            "status": ("状态", 360),
+            "size": ("字号", 65),
+            "spacing": ("间距", 65),
+            "text_w": ("文字宽", 75),
+            "base_len": ("底座长", 75),
+            "status": ("状态", 330),
         }
         self.tree = ttk.Treeview(preview_box, columns=cols, show="headings", height=7)
         for key in cols:
@@ -310,20 +375,40 @@ class StampApp:
                 raise ValueError(f"{label} 不能小于 {minimum}")
             return value
 
-        spec.target_width_mm = num(self.var_width, "目标宽度", 1.0)
         spec.margin_mm = num(self.var_margin, "留白")
-        spec.min_size_mm = num(self.var_min_size, "最小字号", 0.5)
-        spec.max_size_mm = num(self.var_max_size, "最大字号", 0.5)
         spec.weight_offset_mm = num(self.var_weight, "几何加粗")
         spec.base_width_mm = num(self.var_base_w, "底座宽度", 0.5)
         spec.base_height_mm = num(self.var_base_h, "底座高度", 0.5)
         spec.letter_height_mm = num(self.var_letter_h, "文字高度", 0.2)
-        if spec.min_size_mm > spec.max_size_mm:
-            raise ValueError("最小字号不能大于最大字号")
-        if 2 * spec.margin_mm >= spec.target_width_mm:
-            raise ValueError("左右留白之和必须小于目标宽度")
+
+        spec.width_mode = self.var_mode.get() or "fixed"
+        if spec.is_auto_width():
+            spec.auto_size_mm = num(self.var_auto_size, "固定字号", 0.5)
+            spec.auto_spacing = num(self.var_auto_spacing, "字间距", 0.1)
+            # 目标宽度在 auto 模式下不参与计算，填成什么都别拦住预览
+            try:
+                spec.target_width_mm = num(self.var_width, "目标宽度", 1.0)
+            except ValueError:
+                pass
+        else:
+            spec.min_size_mm = num(self.var_min_size, "最小字号", 0.5)
+            spec.max_size_mm = num(self.var_max_size, "最大字号", 0.5)
+            if spec.min_size_mm > spec.max_size_mm:
+                raise ValueError("最小字号不能大于最大字号")
+            if 2 * spec.margin_mm >= spec.target_width_mm:
+                raise ValueError("左右留白之和必须小于目标宽度")
+
         if spec.weight_offset_mm > 0.3:
             raise ValueError("几何加粗建议不超过 0.3mm，否则 A/O/e 的内孔会被填死")
+
+        raw_workers = (self.var_workers.get() or "").strip()
+        if raw_workers:
+            try:
+                cfg.workers = max(0, int(float(raw_workers)))
+            except ValueError:
+                raise ValueError(f"同时生成数不是有效整数：{raw_workers!r}")
+        else:
+            cfg.workers = 0
 
         cfg.font_family = self.var_family.get()
         cfg.font_style = self.var_style.get() or "Regular"
@@ -499,33 +584,39 @@ class StampApp:
         spec = cfg.spec
         unique, duplicates = validate.dedupe(names)
         issues = validate.validate_batch(unique, fm, spec)
-        curve = metrics.resolve_curve(face, spec)
 
         filled = 0
+        auto = spec.is_auto_width()
+        lengths: list[float] = []
         for name in unique:
             blocking = validate.blocking_issues(issues.get(name, []))
-            fit = metrics.fit(fm, name, spec)
+            fit = (
+                metrics.fit_auto(fm, name, spec)
+                if auto
+                else metrics.fit(fm, name, spec)
+            )
             if blocking:
                 note = validate.format_issues(blocking)
                 tag = "err"
-                size = spacing = width = ""
-                fill = ""
+                size = spacing = text_w = base_len = ""
             else:
-                note = "；".join(fit.notes) or {
-                    "ok": "正常",
-                    "underfill": "未填满",
-                    "spacing_min": "间距已压缩",
-                }.get(fit.status, fit.status)
+                if auto:
+                    note = "；".join(fit.notes) or "正常"
+                else:
+                    note = f"填充 {fit.fill_ratio * 100:.0f}%"
+                    if fit.notes:
+                        note += "；" + "；".join(fit.notes)
                 tag = "ok" if fit.status == "ok" else "warn"
                 size = f"{fit.size_mm:.2f}"
                 spacing = f"{fit.spacing:.2f}"
-                width = f"{fit.width_mm:.2f}"
-                fill = f"{fit.fill_ratio * 100:.0f}%"
+                text_w = f"{fit.width_mm:.2f}"
+                base_len = f"{fit.base_len_mm:.2f}"
+                lengths.append(fit.base_len_mm)
                 filled += 1
             self.tree.insert(
                 "",
                 "end",
-                values=(name, len(name), size, spacing, width, fill, note),
+                values=(name, len(name), size, spacing, text_w, base_len, note),
                 tags=(tag,),
             )
         for name in duplicates:
@@ -535,10 +626,10 @@ class StampApp:
                 values=(name, len(name), "", "", "", "", "与本批次前面重名，只生成一次"),
                 tags=("err",),
             )
-        self.var_status.set(
-            f"可生成 {filled} / {len(unique)}　|　{face.label}　"
-            f"精度 $fa={curve[0]:g} $fs={curve[1]:g}"
-        )
+        span = ""
+        if auto and lengths:
+            span = f"　|　底座 {min(lengths):.1f}~{max(lengths):.1f}mm"
+        self.var_status.set(f"可生成 {filled}/{len(unique)}{span}　|　{face.label}")
 
     # ---------------- 自检 ----------------
 
@@ -637,8 +728,12 @@ class StampApp:
             self.log(line)
         self.log("")
         self.log(report.summary())
+        bases = [r.base_len for r in report.results if r.base_len]
+        span = ""
+        if self.cfg.spec.is_auto_width() and bases:
+            span = f"，底座 {min(bases):.1f}~{max(bases):.1f}mm"
         self.var_status.set(
-            f"完成：成功 {report.generated}，跳过 {report.skipped}，失败 {report.failed}"
+            f"完成：成功 {report.generated}，跳过 {report.skipped}，失败 {report.failed}{span}"
         )
 
     def cancel_run(self) -> None:

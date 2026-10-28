@@ -18,9 +18,29 @@ class StampSpec:
     Y = 底座宽度，Z = 底座高度；文字沿 +Z 挤出。
     """
 
+    # --- 宽度求解方向 ---
+    width_mode: str = "auto"
+    """宽度是输入还是输出。
+
+    * ``"auto"``：给定字号与间距，算出每个名字各自的底座长度。字号恒定，
+      成品宽度随名字长短变化 —— 也就是旧版 ``batch_3Dnames.py`` 的行为，
+      只是旧版按字符数查表估算，这里是按字体度量精算。**默认模式**，
+      因为实际生产里绝大多数是"字要一样大"。
+    * ``"fixed"``：给定目标宽度，反解字号与间距。成品一律同宽，适合成套出货。
+    """
+
+    auto_size_mm: float = 6.0
+    """``auto`` 模式下的固定字号；仍受底座宽度约束（字高不得超过底座宽）。"""
+
+    auto_spacing: float = 1.0
+    """``auto`` 模式下的字间距。1.0 为字体原字距。"""
+
     # --- 几何 ---
     target_width_mm: float = 30.0
-    """印章底座长度，也是文字需要填满的目标宽度。"""
+    """``fixed`` 模式的印章底座长度，也是文字需要填满的目标宽度。
+
+    ``auto`` 模式下此值不参与计算，底座长度由 :meth:`base_len_for` 逐名求出。
+    """
 
     margin_mm: float = 1.5
     """文字左右留白（单边）。可用宽度 = target_width - 2*margin。"""
@@ -58,10 +78,25 @@ class StampSpec:
     max_chars: int = 16
 
     def available_mm(self) -> float:
-        """文字可用的净宽度（已扣除两侧留白与加粗占位）。"""
+        """``fixed`` 模式下文字可用的净宽度（已扣除两侧留白与加粗占位）。"""
         return max(
             0.0,
             self.target_width_mm - 2.0 * self.margin_mm - 2.0 * max(0.0, self.weight_offset_mm),
+        )
+
+    def is_auto_width(self) -> bool:
+        return self.width_mode == "auto"
+
+    def base_len_for(self, width_mm: float) -> float:
+        """由文字墨迹宽度反推底座长度（``auto`` 模式）。
+
+        与 :meth:`available_mm` 严格互逆：``base_len_for(available_mm())``
+        应当还原出 ``target_width_mm``，这样两种模式的留白含义完全一致。
+        """
+        return (
+            width_mm
+            + 2.0 * self.margin_mm
+            + 2.0 * max(0.0, self.weight_offset_mm)
         )
 
 
@@ -79,6 +114,13 @@ class AppConfig:
     """STL 实测宽度与目标宽度的允许偏差，超出则按比例修正后重生成。"""
 
     max_fit_retries: int = 2
+
+    workers: int = 0
+    """并发渲染数。0 表示按 CPU 核数自动决定（封顶 4）。
+
+    OpenSCAD 每次调用都是独立进程，彼此无共享状态；fontconfig 缓存已在
+    批次开始前预热，所以并发不会互相拖慢。
+    """
 
     def resolved_openscad(self) -> Path:
         p = Path(self.openscad_path) if self.openscad_path else paths.default_openscad()
@@ -106,11 +148,18 @@ def _filtered(cls_fields: set[str], data: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in data.items() if k in cls_fields}
 
 
+WIDTH_MODES = ("fixed", "auto")
+"""``fixed`` = 定宽自适应字号；``auto`` = 定字号自适应宽度。"""
+
+
 def config_from_dict(data: dict[str, Any]) -> AppConfig:
     """从字典构造配置，忽略未知字段、兼容缺失字段。"""
     spec_data = data.get("spec") or {}
     cfg = AppConfig(**_filtered(_CFG_FIELDS, data))
     cfg.spec = StampSpec(**_filtered(_SPEC_FIELDS, spec_data))
+    # 手工改坏配置时不该让程序起不来，回退到默认模式即可
+    if cfg.spec.width_mode not in WIDTH_MODES:
+        cfg.spec.width_mode = "fixed"
     return cfg
 
 

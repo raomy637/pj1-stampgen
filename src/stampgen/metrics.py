@@ -62,6 +62,11 @@ class FitResult:
     fill_ratio: float
     status: str
     notes: list[str] = field(default_factory=list)
+    base_len_mm: float = 0.0
+    """这个名字对应的底座长度。
+
+    ``fixed`` 模式下恒等于目标宽度；``auto`` 模式下逐名不同。
+    """
 
     @property
     def ok(self) -> bool:
@@ -279,4 +284,78 @@ def fit(metrics: FaceMetrics, text: str, spec: StampSpec) -> FitResult:
         fill_ratio=round(fill, 4),
         status=status,
         notes=notes,
+        base_len_mm=round(spec.target_width_mm, 3),
+    )
+
+
+def fit_auto(metrics: FaceMetrics, text: str, spec: StampSpec) -> FitResult:
+    """定字号自适应宽度：字号与间距固定，算出成品宽度与底座长度。
+
+    这是旧版 ``batch_3Dnames.py`` 的行为 —— 字始终一样大，底座随名字长短伸缩。
+    区别在于旧版按字符数查表（2→18mm、3→24mm、5→36mm）估长度，这里直接用
+    字体度量精算墨迹宽度，批次生成时还会用一次实测探针把误差压到 0.02mm 级。
+
+    字号仍受底座宽度约束：字高不能超过底座宽，否则字母会悬在底座外。
+    """
+    text = (text or "").strip()
+    if not text:
+        return FitResult(0.0, spec.auto_spacing, 0.0, 0.0, 0.0, "empty", ["名字为空"])
+
+    missing = metrics.missing_chars(text)
+    if missing:
+        return FitResult(
+            0.0,
+            spec.auto_spacing,
+            0.0,
+            0.0,
+            0.0,
+            "missing_glyph",
+            [f"当前字体缺少字符：{''.join(missing)}"],
+        )
+
+    k, c = ink_linear(metrics, text)
+    if k <= 0 and c <= 0:
+        return FitResult(0.0, spec.auto_spacing, 0.0, 0.0, 0.0, "invalid", ["字体度量为空"])
+
+    notes: list[str] = []
+    size = spec.auto_size_mm
+    spacing = spec.auto_spacing
+    status = "ok"
+
+    # 这里只认"字高不得超过底座宽"这条硬约束，不套用 fixed 模式的 edge_mm 舒适余量。
+    # 原因：fixed 模式的字号是算出来的，留 0.2mm 余量合理；auto 模式的字号是用户
+    # 指定的（旧版一直是 6mm 字配 6mm 底座，字高 5.88mm 贴边但能打印），
+    # 再按 0.2mm 余量去压，会莫名其妙把 6mm 变成 5.71mm。
+    cap_ratio = metrics.cap_ratio()
+    hard_limit = (
+        spec.base_width_mm / (cap_ratio * OPENSCAD_SIZE_SCALE) if cap_ratio > 0 else spec.max_size_mm
+    )
+    if size > hard_limit:
+        cap = cap_height_mm(metrics, size)
+        need_base_w = cap
+        notes.append(
+            f"字号 {size:.2f}mm 的字高 {cap:.2f}mm 超出底座宽度 {spec.base_width_mm:.2f}mm，"
+            f"已压到 {hard_limit:.2f}mm；想用原字号请把底座宽度加到 {need_base_w:.2f}mm"
+        )
+        size = hard_limit
+        status = "size_capped"
+    elif size < spec.hard_min_size_mm:
+        notes.append(
+            f"字号 {size:.2f}mm 低于可成形下限 {spec.hard_min_size_mm:.2f}mm，"
+            f"字形可能糊在一起"
+        )
+        status = "size_too_small"
+
+    width = predict_width(metrics, text, size, spacing, spec.weight_offset_mm)
+    base_len = spec.base_len_for(width)
+
+    return FitResult(
+        size_mm=round(size, 3),
+        spacing=round(spacing, 3),
+        width_mm=round(width, 3),
+        available_mm=round(width, 3),
+        fill_ratio=1.0,
+        status=status,
+        notes=notes,
+        base_len_mm=round(base_len, 3),
     )

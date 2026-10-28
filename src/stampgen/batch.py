@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +23,7 @@ ProgressFn = Callable[[int, int, str, str], None]
 LogFn = Callable[[str], None]
 
 PROBE_SIZE = 10.0
-"""探针渲染使用的固定字号；宽度与字号成正比，据此反推目标字号。"""
+"""探针渲染使用的固定字号；宽度与字号成正比，据此反推目标字号或精确宽度。"""
 
 
 @dataclass
@@ -37,6 +39,8 @@ class NameResult:
     fill_ratio: float = 0.0
     attempts: int = 0
     message: str = ""
+    base_len: float = 0.0
+    """实际用于渲染的底座长度（auto 模式下逐名不同）。"""
 
     @property
     def deviation(self) -> float | None:
@@ -62,9 +66,10 @@ class BatchReport:
         for r in self.results:
             mark = {"ok": "OK", "skipped": "--", "failed": "NG"}.get(r.status, "??")
             measured = f"{r.measured_width:.2f}" if r.measured_width is not None else "-"
+            base = f"{r.base_len:.2f}" if r.base_len else "-"
             rows.append(
                 f"{mark} {r.name:<16} 字号 {r.size_mm:>5.2f}  间距 {r.spacing:>4.2f}  "
-                f"预测 {r.predicted_width:>6.2f}  实测 {measured:>6}  {r.message}"
+                f"底座 {base:>6}  文字宽 {measured:>6}  {r.message}"
             )
         return rows
 
@@ -94,6 +99,18 @@ def _noop(*_args, **_kwargs) -> None:
     return None
 
 
+def resolve_workers(requested: int, total: int) -> int:
+    """决定并发数。0 或负数表示自动：按 CPU 核数，封顶 4。
+
+    封顶 4 是因为 OpenSCAD 渲染是 CPU 密集型的，再往上加收益递减，
+    反而把机器拖到没法干别的事。
+    """
+    if total <= 0:
+        return 1
+    count = requested if requested and requested > 0 else min(4, os.cpu_count() or 1)
+    return max(1, min(count, total))
+
+
 def run_batch(
     cfg: AppConfig,
     names: Sequence[str],
@@ -107,6 +124,7 @@ def run_batch(
     log = log or _noop
     library = library or FontLibrary()
     spec = cfg.spec
+    auto = spec.is_auto_width()
 
     face = library.find(cfg.font_family, cfg.font_style)
     if face is None:
@@ -122,7 +140,13 @@ def run_batch(
 
     log(f"字体：{face.label}（{face.path.name}）")
     log(f"曲面精度：$fa={curve[0]:g} $fs={curve[1]:g}（{'字体自带细节，粗精度' if face.is_dense_outline else '轮廓干净，细精度'}）")
-    log(f"目标宽度：{spec.target_width_mm}mm，文字可用宽度：{spec.available_mm():.2f}mm")
+    if auto:
+        log(
+            f"宽度模式：固定字号 {spec.auto_size_mm:g}mm、间距 {spec.auto_spacing:g}，"
+            f"逐名计算底座长度"
+        )
+    else:
+        log(f"宽度模式：固定宽度 {spec.target_width_mm}mm，文字可用宽度 {spec.available_mm():.2f}mm")
 
     work, duplicates = validate.dedupe(list(names))
     issues = validate.validate_batch(work, font_metrics, spec)
@@ -138,25 +162,43 @@ def run_batch(
         log(f"预热失败（不致命）：{exc}")
 
     z_probe = spec.base_height_mm / 2.0 + 0.6
+    workers = resolve_workers(cfg.workers, len(work))
+    if workers > 1:
+        log(f"并发渲染：{workers} 路")
 
-    for index, name in enumerate(work, start=1):
+    lock = threading.Lock()
+    done_count = 0
+
+    def say(message: str) -> None:
+        # 并发时两条日志会互相插进对方中间，加锁保证每条完整
+        with lock:
+            log(message)
+
+    def tick(index: int, name: str, status: str) -> None:
+        nonlocal done_count
+        with lock:
+            done_count += 1
+            done = done_count
+        progress(done, len(work), name, status)
+
+    def process(index: int, name: str) -> NameResult:
         if cancel is not None and cancel.is_set():
-            log("已取消")
-            break
-
+            # 并发时任务可能在取消信号发出后才被调度到，这里再兜一次
+            return NameResult(name, "skipped", message="已取消")
         found = issues.get(name, [])
         blocking = validate.blocking_issues(found)
         if blocking:
-            report.skipped += 1
             result = NameResult(name, "skipped", message=validate.format_issues(blocking))
-            report.results.append(result)
-            progress(index, len(work), name, "跳过")
-            log(f"[跳过] {name}：{result.message}")
-            continue
+            tick(index, name, "跳过")
+            say(f"[跳过] {name}：{result.message}")
+            return result
 
-        fit = metrics.fit(font_metrics, name, spec)
+        fit = (
+            metrics.fit_auto(font_metrics, name, spec)
+            if auto
+            else metrics.fit(font_metrics, name, spec)
+        )
         if not fit.ok:
-            report.skipped += 1
             result = NameResult(
                 name,
                 "skipped",
@@ -164,23 +206,28 @@ def run_batch(
                 spacing=fit.spacing,
                 predicted_width=fit.width_mm,
                 fill_ratio=fit.fill_ratio,
+                base_len=fit.base_len_mm,
                 message="；".join(fit.notes) or fit.status,
             )
-            report.results.append(result)
-            progress(index, len(work), name, "跳过")
-            log(f"[跳过] {name}：{result.message}")
-            continue
+            tick(index, name, "跳过")
+            say(f"[跳过] {name}：{result.message}")
+            return result
 
-        lo, hi = metrics.size_bounds(font_metrics, spec)
         # 解析模型只能给到 1~2% 精度（字体 GPOS 字距会额外收紧），
-        # 用一次廉价的实测探针反推精确字号与精确宽度。
+        # 用一次廉价的实测探针把宽度校准到 0.02mm 级。
         try:
             probe_w = openscad.probe_text_width(exe, face, name, fit.spacing, env)
-            if fit.status == "underfill":
+            exact_w = probe_w * fit.size_mm / PROBE_SIZE
+            if auto:
+                # 底座长度直接由实测宽度决定 —— 这就是"预测成品宽度"的最终值
+                fit.width_mm = round(exact_w, 3)
+                fit.base_len_mm = round(spec.base_len_for(exact_w), 3)
+            elif fit.status == "underfill":
                 # 短名字：字号与间距都已到顶，只校正报告里的宽度
-                fit.width_mm = round(probe_w * fit.size_mm / PROBE_SIZE, 3)
+                fit.width_mm = round(exact_w, 3)
             else:
                 exact = metrics.size_from_probe(probe_w, PROBE_SIZE, spec.available_mm())
+                lo, hi = metrics.size_bounds(font_metrics, spec)
                 if exact > hi:
                     exact = hi
                     fit.notes.append("字号已顶到上限，未填满目标宽度")
@@ -190,14 +237,15 @@ def run_batch(
                     fit.notes.append("字号已到下限")
                 fit.size_mm = round(exact, 3)
                 fit.width_mm = round(probe_w * fit.size_mm / PROBE_SIZE, 3)
-            if spec.available_mm() > 0:
+
+            if not auto and spec.available_mm() > 0:
                 fit.fill_ratio = round(fit.width_mm / spec.available_mm(), 4)
-            if fit.status == "underfill":
+            if fit.status == "underfill" and not auto:
                 # 探针回填了真实宽度，提示里的数字也要跟着更新
                 note = metrics.underfill_note(spec, fit.width_mm, spec.available_mm())
                 fit.notes = [n for n in fit.notes if not n.startswith("成品仅")] + [note]
         except openscad.OpenSCADError as exc:
-            log(f"  探针失败，改用解析估算：{exc}")
+            say(f"  探针失败，改用解析估算：{exc}")
 
         out_path = output_dir / f"{name}.stl"
         result = NameResult(
@@ -207,6 +255,7 @@ def run_batch(
             spacing=fit.spacing,
             predicted_width=fit.width_mm,
             fill_ratio=fit.fill_ratio,
+            base_len=fit.base_len_mm,
         )
         current_fit = fit
         attempts = 0
@@ -223,6 +272,18 @@ def run_batch(
                 result.measured_depth = round(extent.depth, 3)
                 result.size_mm = params.letter_size
                 result.spacing = params.letter_spacing
+                result.base_len = params.base_len
+
+                if auto:
+                    # 底座长度本身就是按预测宽度定的，没有"目标宽度"可对齐；
+                    # 这里只校验预测准不准，偏差大就记一笔，不重渲染。
+                    drift = extent.width - current_fit.width_mm
+                    if abs(drift) > cfg.verify_tolerance_mm:
+                        result.message = (
+                            f"预测文字宽 {current_fit.width_mm:.2f}mm，"
+                            f"实测 {extent.width:.2f}mm，偏差 {drift:+.2f}mm"
+                        )
+                    break
 
                 drift = extent.width - spec.available_mm()
                 if abs(drift) <= cfg.verify_tolerance_mm:
@@ -241,7 +302,7 @@ def run_batch(
                 if abs(new_size - current_fit.size_mm) < 0.01:
                     result.message = f"实测偏差 {drift:+.2f}mm，字号已到边界"
                     break
-                log(f"  修正 {name}：字号 {current_fit.size_mm:.2f} → {new_size:.2f}")
+                say(f"  修正 {name}：字号 {current_fit.size_mm:.2f} → {new_size:.2f}")
                 current_fit.size_mm = round(new_size, 3)
                 current_fit.width_mm = round(
                     metrics.predict_width(
@@ -252,19 +313,63 @@ def run_batch(
                 result.predicted_width = current_fit.width_mm
 
             result.attempts = attempts
-            report.generated += 1
-            progress(index, len(work), name, "完成")
-            log(f"[生成] ({index}/{len(work)}) {name} 字号 {result.size_mm:.2f} 间距 {result.spacing:.2f} 实测宽 {result.measured_width:.2f}mm")
+            tick(index, name, "完成")
+            say(
+                f"[生成] ({index}/{len(work)}) {name} 字号 {result.size_mm:.2f} "
+                f"间距 {result.spacing:.2f} 底座 {result.base_len:.2f} "
+                f"文字宽 {result.measured_width:.2f}mm"
+            )
         except Exception as exc:  # 单个失败不影响整批
-            report.failed += 1
             result.status = "failed"
             result.message = str(exc)
-            progress(index, len(work), name, "失败")
-            log(f"[失败] {name}：{exc}")
+            tick(index, name, "失败")
+            say(f"[失败] {name}：{exc}")
             if out_path.exists() and out_path.stat().st_size == 0:
                 out_path.unlink(missing_ok=True)
 
-        report.results.append(result)
+        return result
+
+    results: dict[int, NameResult] = {}
+    already_cancelled = cancel is not None and cancel.is_set()
+
+    if already_cancelled:
+        say("已取消")
+        for index, name in enumerate(work, start=1):
+            results[index] = NameResult(name, "skipped", message="已取消")
+    elif workers == 1:
+        for index, name in enumerate(work, start=1):
+            if cancel is not None and cancel.is_set():
+                say("已取消")
+                break
+            results[index] = process(index, name)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(process, i, n): i for i, n in enumerate(work, start=1)}
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    results[index] = future.result()
+                except Exception as exc:  # process 内部已兜底，这里只防万一
+                    name = work[index - 1]
+                    results[index] = NameResult(name, "failed", message=str(exc))
+                    say(f"[失败] {name}：{exc}")
+                if cancel is not None and cancel.is_set():
+                    # 已开始的任务没法撤回，但还没轮到的可以取消
+                    for pending in futures:
+                        pending.cancel()
+                    say("已取消，等待进行中的任务结束…")
+                    break
+
+    # 并发完成顺序是乱的，结果要按名字清单的原顺序落盘
+    for index in sorted(results):
+        item = results[index]
+        report.results.append(item)
+        if item.status == "ok":
+            report.generated += 1
+        elif item.status == "skipped":
+            report.skipped += 1
+        else:
+            report.failed += 1
 
     for dup in duplicates:
         report.skipped += 1

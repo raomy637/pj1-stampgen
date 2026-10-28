@@ -67,3 +67,35 @@ def test_existing_template_path_is_respected(tmp_path):
     tpl.write_text("// custom", encoding="utf-8")
     cfg = AppConfig(scad_template=str(tpl))
     assert cfg.resolved_template() == tpl
+
+
+def test_width_mode_roundtrip(tmp_path):
+    path = tmp_path / "mode.json"
+    cfg = AppConfig()
+    cfg.spec = StampSpec(width_mode="auto", auto_size_mm=5.5, auto_spacing=1.15)
+    cfg.workers = 3
+    save_config(cfg, path)
+
+    loaded = load_config(path)
+    assert loaded.spec.width_mode == "auto"
+    assert loaded.spec.auto_size_mm == 5.5
+    assert loaded.spec.auto_spacing == 1.15
+    assert loaded.workers == 3
+
+
+def test_invalid_width_mode_falls_back_to_fixed(tmp_path):
+    """手工把配置改坏时不该让程序起不来。"""
+    path = tmp_path / "bad_mode.json"
+    path.write_text('{"spec": {"width_mode": "随便写的"}}', encoding="utf-8")
+    assert load_config(path).spec.width_mode == "fixed"
+
+
+def test_base_len_for_inverts_available_mm():
+    """auto 模式的底座长度与 fixed 模式的可用宽度必须严格互逆。"""
+    spec = StampSpec(target_width_mm=30, margin_mm=1.5, weight_offset_mm=0.1)
+    assert spec.base_len_for(spec.available_mm()) == 30.0
+
+
+def test_is_auto_width():
+    assert StampSpec(width_mode="auto").is_auto_width()
+    assert not StampSpec(width_mode="fixed").is_auto_width()
