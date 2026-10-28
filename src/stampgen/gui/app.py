@@ -25,7 +25,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from .. import batch as batch_mod
-from .. import metrics, paths, validate
+from .. import console, metrics, paths, validate
 from ..config import CASE_LABELS, AppConfig, load_config, save_config
 from ..fonts import FontFace, FontLibrary
 from . import fontpreview
@@ -158,6 +158,8 @@ class StampApp:
         self.var_open_after = tk.BooleanVar(value=self.cfg.open_output_after_run)
         self.var_status = tk.StringVar(value="就绪")
         self.var_names_stat = tk.StringVar(value="共 0 个")
+        self.var_names_file = tk.StringVar(value="")
+        self.var_preview_caption = tk.StringVar(value="")
 
         self.var_openscad = tk.StringVar(
             value=self.cfg.openscad_path or str(paths.default_openscad())
@@ -280,6 +282,7 @@ class StampApp:
         )
         spin_weight.grid(row=0, column=9, sticky="w", pady=2)
         spin_weight.bind("<FocusOut>", lambda _e: self._schedule_preview())
+        spin_weight.bind("<KeyRelease>", lambda _e: self._schedule_preview())
         self._spec_widgets["weight_offset_mm"] = spin_weight  # type: ignore[assignment]
 
         ttk.Label(box, text="大小写").grid(row=0, column=10, sticky="e", padx=(16, 6), pady=2)
@@ -317,7 +320,7 @@ class StampApp:
 
         ttk.Label(
             box,
-            text="预览只反映字形观感；成品尺寸以生成时的实测探针为准",
+            textvariable=self.var_preview_caption,
             foreground=COLOR_MUTED,
         ).grid(row=2, column=0, columnspan=12, sticky="w", pady=(4, 0))
         return box
@@ -373,8 +376,12 @@ class StampApp:
         bar = ttk.Frame(right)
         bar.grid(row=0, column=0, sticky="we", pady=(0, 5))
         ttk.Button(bar, text="选择 txt 文件", width=13, command=self._pick_names).pack(side="left")
-        ttk.Label(bar, textvariable=self.var_names_stat, foreground=COLOR_MUTED).pack(
+        # 选完之后这里显示文件名，用户一眼知道现在用的是哪个清单
+        ttk.Label(bar, textvariable=self.var_names_file, foreground=COLOR_INFO).pack(
             side="left", padx=(10, 0)
+        )
+        ttk.Label(bar, textvariable=self.var_names_stat, foreground=COLOR_MUTED).pack(
+            side="left", padx=(8, 0)
         )
         ttk.Label(
             bar, text="也可直接粘贴，一行一个名字", foreground=COLOR_MUTED
@@ -534,6 +541,12 @@ class StampApp:
             size_mm, weight = 6.0, 0.0
         names = self._read_names()
         text = fontpreview.sample_text(self._case_mode(), names[0] if names else "")
+        # 把当前参数写出来：加粗 0.02mm 的视觉差异很小，有数字回显才确认得了
+        self.var_preview_caption.set(
+            f"字号 {size_mm:g}mm · 加粗 {weight:g}mm · "
+            f"{CASE_LABELS.get(self._case_mode(), '保持原样')} · "
+            f"预览仅供参考，成品尺寸以生成时的实测探针为准"
+        )
         width = max(self.preview_holder.winfo_width() - 16, 480)
         rendered = fontpreview.render_preview(
             face.path,
@@ -564,8 +577,9 @@ class StampApp:
 
     def _load_cfg_into_ui(self) -> None:
         self.var_outroot.set(self.cfg.output_root_dir)
-        if self.cfg.names_txt and Path(self.cfg.names_txt).is_file():
-            self._load_names_file(Path(self.cfg.names_txt), quiet=True)
+        # 故意不自动载入上次的清单：那些名字多半已经生成过了，
+        # 一打开就填满会让人以为要重新跑一遍。cfg.names_txt 只留着
+        # 给「选择 txt 文件」对话框当初始目录，以及命名输出文件夹。
         self._refresh_output_label()
         self.preview()
 
@@ -608,7 +622,8 @@ class StampApp:
 
         cfg.font_family = self.var_family.get()
         cfg.font_style = self.var_style.get() or "Regular"
-        cfg.names_txt = self._names_source_txt
+        # 本次没选文件时保留上次的路径，下次「选择」对话框直接打开那个目录
+        cfg.names_txt = self._names_source_txt or self.cfg.names_txt
         cfg.output_root_dir = self.var_outroot.get().strip()
         cfg.open_output_after_run = bool(self.var_open_after.get())
         # 与默认值相同就存空串：这样换机器、移动 exe 之后会自动重新探测，
@@ -740,31 +755,34 @@ class StampApp:
         if duplicates:
             text += f"（重名 {len(duplicates)}，去重后 {len(unique)}）"
         self.var_names_stat.set(text)
+        if self._names_source_txt:
+            name = Path(self._names_source_txt).name
+            self.var_names_file.set(console.truncate(name, 28))
+        else:
+            self.var_names_file.set("（粘贴输入）" if names else "")
 
-    def _load_names_file(self, path: Path, quiet: bool = False) -> None:
+    def _load_names_file(self, path: Path) -> None:
         try:
             content = _read_text_file(path)
         except OSError as exc:
-            if not quiet:
-                messagebox.showerror(APP_TITLE, f"读取失败：{exc}")
+            messagebox.showerror(APP_TITLE, f"读取失败：{exc}")
             return
         self._names_source_txt = str(path)
         self.txt_names.delete("1.0", "end")
         self.txt_names.insert("1.0", content.strip())
         self._redraw_line_numbers()
         self._refresh_output_label()
-        if not quiet:
-            self.preview()
+        self.preview()
 
     # ---------------- 交互 ----------------
 
     def _pick_names(self) -> None:
+        # 优先打开当前清单所在目录；没选过就退回上次用过的那个
+        start = self._names_source_txt or self.cfg.names_txt
         path = filedialog.askopenfilename(
             title="选择名字清单",
             filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
-            initialdir=str(Path(self._names_source_txt).parent)
-            if self._names_source_txt
-            else str(paths.app_root()),
+            initialdir=str(Path(start).parent) if start else str(paths.app_root()),
         )
         if path:
             self._load_names_file(Path(path))

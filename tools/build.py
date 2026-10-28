@@ -42,7 +42,7 @@ ICON = ROOT / "assets" / "stampgen.ico"
 
 APP_NAME = "StampGen"
 CLI_NAME = "stampgen-cli"
-VERSION = (2, 2, 1, 0)
+VERSION = (2, 2, 2, 0)
 VERSION_STR = ".".join(str(x) for x in VERSION[:3])
 
 # 需要随程序分发的只读资源：源目录 -> exe 内目录名
@@ -100,7 +100,7 @@ QUICKSTART = """\
    预览条会实时显示字形；改字号、加粗、大小写都会跟着变。
 4. 选名字清单：点「选择 txt 文件」，或直接把名字粘贴进右下框
    （左边有行号，一行一个名字）。大小写在读入后立即生效。
-5. 点「开始生成」，STL 输出到 <输出目录>\output_stl<日期>\，
+5. 点「开始生成」，STL 输出到 <输出目录>\\output_stl<日期>\\，
    完成后会自动打开该文件夹（可在配置区取消勾选）。
 
   结果表会列出每个名字的字号、间距、底座长与状态，
@@ -131,7 +131,7 @@ QUICKSTART = """\
 【想用自己的字体】
 
 在本 exe 旁边新建 fonts 文件夹，把 .ttf 丢进去即可——
-程序会优先使用外部 fonts\，没有才用 exe 内置的字体。
+程序会优先使用外部 fonts\\，没有才用 exe 内置的字体。
 
 【命令行用法】
 

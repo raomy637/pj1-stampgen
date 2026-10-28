@@ -7,6 +7,7 @@ Tk 根本找不到它。Pillow 的 ``ImageFont.truetype(path)`` 可以直接按�
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 PREVIEW_SAMPLES = {
@@ -60,13 +61,17 @@ def render_preview(
             font = ImageFont.truetype(str(font_path), px)
         except Exception:
             return None
-        stroke = max(0, int(round(weight_mm * scale)))
+        # 这里必须用浮点：stroke_width 取整会把 0~0.3mm 的加粗压成 0/1/2 三档，
+        # 只有跨档时预览才变（0.08 和 0.20），中间任何数值看起来都"没反应"。
+        # Pillow 的 stroke_width 支持浮点并做抗锯齿，改动 0.02mm 也看得出来。
+        stroke = max(0.0, weight_mm * scale)
         try:
             box = font.getbbox(text, stroke_width=stroke)
         except TypeError:  # 老版本 Pillow 不支持 stroke_width
             box = font.getbbox(text)
-        width = box[2] - box[0] + 2 * PAD
-        height = box[3] - box[1] + 2 * PAD
+        # stroke 是浮点时 getbbox 也返回浮点，画布尺寸必须取整
+        width = int(math.ceil(box[2] - box[0] + 2 * PAD))
+        height = int(math.ceil(box[3] - box[1] + 2 * PAD))
         too_wide = width > max_px
         too_tall = height > max_height_px
         if (too_wide or too_tall) and scale != SCALE_CANDIDATES[-1]:
