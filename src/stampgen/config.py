@@ -1,4 +1,8 @@
-"""配置模型与 JSON 持久化。"""
+"""配置模型与 JSON 持久化。
+
+v2.2.0 起只有一种宽度逻辑：**限宽**。字号由用户给定，底座长度按名字精算，
+但不超过 ``max_width_mm``。短名字不补齐，长名字先压间距、再缩字号。
+"""
 
 from __future__ import annotations
 
@@ -9,95 +13,96 @@ from typing import Any
 
 from . import paths
 
+CASE_MODES = ("keep", "upper", "capitalize", "lower")
+"""大小写转换方式。
+
+* ``keep``：原样
+* ``upper``：全部大写
+* ``capitalize``：每个词首字母大写
+* ``lower``：全部小写
+"""
+
+CASE_LABELS = {
+    "keep": "保持原样",
+    "upper": "全部大写",
+    "capitalize": "首字母大写",
+    "lower": "全部小写",
+}
+
 
 @dataclass
 class StampSpec:
-    """印章几何与自适应拟合参数（单位：毫米）。
+    """印章几何与字体参数（长度单位：毫米）。
 
-    坐标约定与 SCAD 模板一致：X = 底座长度（即目标宽度方向），
+    坐标约定与 SCAD 模板一致：X = 底座长度（文字排布方向），
     Y = 底座宽度，Z = 底座高度；文字沿 +Z 挤出。
     """
 
-    # --- 宽度求解方向 ---
-    width_mode: str = "auto"
-    """宽度是输入还是输出。
-
-    * ``"auto"``：给定字号与间距，算出每个名字各自的底座长度。字号恒定，
-      成品宽度随名字长短变化 —— 也就是旧版 ``batch_3Dnames.py`` 的行为，
-      只是旧版按字符数查表估算，这里是按字体度量精算。**默认模式**，
-      因为实际生产里绝大多数是"字要一样大"。
-    * ``"fixed"``：给定目标宽度，反解字号与间距。成品一律同宽，适合成套出货。
-    """
-
-    auto_size_mm: float = 6.0
-    """``auto`` 模式下的固定字号；仍受底座宽度约束（字高不得超过底座宽）。"""
-
-    auto_spacing: float = 1.0
-    """``auto`` 模式下的字间距。1.0 为字体原字距。"""
-
-    # --- 几何 ---
-    target_width_mm: float = 30.0
-    """``fixed`` 模式的印章底座长度，也是文字需要填满的目标宽度。
-
-    ``auto`` 模式下此值不参与计算，底座长度由 :meth:`base_len_for` 逐名求出。
-    """
-
-    margin_mm: float = 1.5
-    """文字左右留白（单边）。可用宽度 = target_width - 2*margin。"""
-
+    # --- 印章几何 ---
     base_width_mm: float = 6.0
+    """底座宽度（Y 方向）。字高不得超过它，否则字母会悬在底座外。"""
+
     base_height_mm: float = 10.0
+    """底座高度（Z 方向，即手柄连接部分的厚度）。"""
+
     letter_height_mm: float = 6.0
     """文字挤出高度（沿 Z）。"""
 
-    edge_mm: float = 0.2
-    """字高方向与底座边缘的安全间隙，用于约束最大字号。"""
+    max_width_mm: float = 60.0
+    """底座长度的硬上限。
 
-    # --- 自适应拟合 ---
-    min_size_mm: float = 3.5
-    max_size_mm: float = 6.0
-    """用户设定的字号上限；实际还会被 base_width 的几何约束进一步压低。"""
+    实际底座长度由名字宽度算出，**短名字不补齐到上限**；
+    只有算出超过上限时才压缩（先压间距，再缩字号）。
+    """
 
-    hard_min_size_mm: float = 2.5
-    """低于此字号视为无法成形，直接判为超长。"""
+    margin_mm: float = 1.5
+    """文字左右留白（单边）。底座长度 = 文字宽 + 2 × 留白。"""
 
-    default_spacing: float = 1.0
+    # --- 字体 ---
+    font_size_mm: float = 6.0
+    """字号。仍受底座宽度约束（字高不得超过底座宽），超出时自动压低并提示。"""
+
+    letter_spacing: float = 1.0
+    """字间距。1.0 为字体原字距，大于 1 更疏、小于 1 更紧。"""
+
     min_spacing: float = 0.85
-    max_spacing: float = 1.6
+    """超宽时允许压缩到的间距下限。再往下字形会粘连。"""
 
-    # --- 字重 ---
     weight_offset_mm: float = 0.0
-    """几何加粗量（offset delta）。0 表示不加粗，安全上限约 0.25mm。"""
+    """几何加粗量（``offset(delta)``）。0 表示不加粗，安全上限约 0.3mm。"""
 
-    # --- 曲面精度 ---
+    case_mode: str = "keep"
+    """大小写转换，取值见 :data:`CASE_MODES`。"""
+
+    # --- 精度与保护 ---
+    hard_min_size_mm: float = 2.5
+    """低于此字号视为无法成形，判为超长并跳过。"""
+
     curve_fa: float = 0.0
     curve_fs: float = 0.0
     """0 表示自动：按字体轮廓复杂度选精度，见 :func:`stampgen.metrics.resolve_curve`。"""
 
-    # --- 校验 ---
     max_chars: int = 16
 
-    def available_mm(self) -> float:
-        """``fixed`` 模式下文字可用的净宽度（已扣除两侧留白与加粗占位）。"""
-        return max(
-            0.0,
-            self.target_width_mm - 2.0 * self.margin_mm - 2.0 * max(0.0, self.weight_offset_mm),
-        )
-
-    def is_auto_width(self) -> bool:
-        return self.width_mode == "auto"
-
     def base_len_for(self, width_mm: float) -> float:
-        """由文字墨迹宽度反推底座长度（``auto`` 模式）。
-
-        与 :meth:`available_mm` 严格互逆：``base_len_for(available_mm())``
-        应当还原出 ``target_width_mm``，这样两种模式的留白含义完全一致。
-        """
+        """由文字墨迹宽度反推底座长度。"""
         return (
             width_mm
             + 2.0 * self.margin_mm
             + 2.0 * max(0.0, self.weight_offset_mm)
         )
+
+    def max_text_width(self) -> float:
+        """在上限之内，文字允许占据的最大墨迹宽度。"""
+        return max(
+            0.0,
+            self.max_width_mm
+            - 2.0 * self.margin_mm
+            - 2.0 * max(0.0, self.weight_offset_mm),
+        )
+
+    def effective_case(self) -> str:
+        return self.case_mode if self.case_mode in CASE_MODES else "keep"
 
 
 @dataclass
@@ -111,7 +116,7 @@ class AppConfig:
     spec: StampSpec = field(default_factory=StampSpec)
 
     verify_tolerance_mm: float = 0.3
-    """STL 实测宽度与目标宽度的允许偏差，超出则按比例修正后重生成。"""
+    """STL 实测宽度与预测底座长的允许偏差，超出则按比例修正后重生成。"""
 
     max_fit_retries: int = 2
 
@@ -121,6 +126,9 @@ class AppConfig:
     OpenSCAD 每次调用都是独立进程，彼此无共享状态；fontconfig 缓存已在
     批次开始前预热，所以并发不会互相拖慢。
     """
+
+    open_output_after_run: bool = True
+    """生成完成后自动打开输出文件夹。"""
 
     def resolved_openscad(self) -> Path:
         p = Path(self.openscad_path) if self.openscad_path else paths.default_openscad()
@@ -143,23 +151,47 @@ class AppConfig:
 _SPEC_FIELDS = {f.name for f in fields(StampSpec)}
 _CFG_FIELDS = {f.name for f in fields(AppConfig)}
 
+#: 旧版本字段名 → 新字段名。v2.1.0 用 auto_size_mm / auto_spacing。
+_SPEC_ALIASES = {
+    "auto_size_mm": "font_size_mm",
+    "auto_spacing": "letter_spacing",
+}
+
 
 def _filtered(cls_fields: set[str], data: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in data.items() if k in cls_fields}
 
 
-WIDTH_MODES = ("fixed", "auto")
-"""``fixed`` = 定宽自适应字号；``auto`` = 定字号自适应宽度。"""
+def migrate_spec_dict(spec_data: dict[str, Any]) -> dict[str, Any]:
+    """把旧版配置字典迁移成新版字段名。
+
+    * ``auto_size_mm`` → ``font_size_mm``
+    * ``auto_spacing`` → ``letter_spacing``
+    * 旧版 ``target_width_mm``（定宽模式的目标宽度）若大于默认上限，
+      则把它当作 ``max_width_mm``，避免老用户突然发现成品变短。
+    * 其余旧字段（``width_mode`` / ``min_size_mm`` / ``max_size_mm`` 等）
+      直接丢弃，由 :func:`_filtered` 兜底。
+    """
+    data = dict(spec_data)
+    for old, new in _SPEC_ALIASES.items():
+        if new not in data and old in data:
+            data[new] = data[old]
+
+    legacy_width = data.get("target_width_mm")
+    if "max_width_mm" not in data and isinstance(legacy_width, (int, float)):
+        if float(legacy_width) > StampSpec.max_width_mm:
+            data["max_width_mm"] = float(legacy_width)
+    return data
 
 
 def config_from_dict(data: dict[str, Any]) -> AppConfig:
     """从字典构造配置，忽略未知字段、兼容缺失字段。"""
-    spec_data = data.get("spec") or {}
+    spec_data = migrate_spec_dict(data.get("spec") or {})
     cfg = AppConfig(**_filtered(_CFG_FIELDS, data))
     cfg.spec = StampSpec(**_filtered(_SPEC_FIELDS, spec_data))
-    # 手工改坏配置时不该让程序起不来，回退到默认模式即可
-    if cfg.spec.width_mode not in WIDTH_MODES:
-        cfg.spec.width_mode = "fixed"
+    # 手工改坏配置时不该让程序起不来，回退到默认值即可
+    if cfg.spec.case_mode not in CASE_MODES:
+        cfg.spec.case_mode = "keep"
     return cfg
 
 

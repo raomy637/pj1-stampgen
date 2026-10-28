@@ -1,4 +1,4 @@
-"""字宽模型与定宽自适应求解。
+"""字宽模型与限宽求解。
 
 核心结论（已在 OpenSCAD 2021.01 上实测校准）：
 
@@ -12,7 +12,16 @@
    其中 ``k`` 是「末字符之前的 advance 之和」，``c`` 是
    「末字符 xMax − 首字符 xMin」，两者都由字体度量精确给出。
    实测偏差 < 0.5%（旧版只累加 advance 的近似式偏差约 1%）。
-3. ``offset(delta=d)`` 几何加粗会让墨迹两侧各外扩 d，宽度增加约 2d。
+3. ``offset(delta=d)`` 几何加粗会让墨迹两侧各外扩 d，宽度与字高各增加 2d。
+
+求解策略（v2.2.0 起只有一种模式）：**限宽**。
+
+    size = 用户给定字号（先受「字高 ≤ 底座宽」硬约束压低）
+    width = predict(text, size, spacing)
+    若 width > 上限：先压间距到 min_spacing，仍超则按比例缩字号，
+    缩到 hard_min_size_mm 还超就判 too_long。
+
+短名字不补齐到上限 —— 3 个字母的印章就该比 8 个字母的短。
 """
 
 from __future__ import annotations
@@ -38,6 +47,48 @@ CURVE_DENSE = (12.0, 2.0)
 #: 轮廓干净、靠贝塞尔曲线描述字形：必须细精度，否则 O/R 会明显多边形化。
 CURVE_CLEAN = (4.0, 0.3)
 
+GEOMETRY_TOLERANCE_MM = 0.05
+"""字高超出底座宽度的容许量。
+
+与模板里的 ``overlap = 0.05`` 同量级：一根 0.4mm 喷嘴的八分之一，
+粘得住、看得见，不值得为它把字号压掉 0.04mm 并在每一行标「限字高」。
+"""
+
+STATUS_LABELS = {
+    "ok": "正常",
+    "spacing_compressed": "已压缩",
+    "size_capped": "限字高",
+    "size_shrunk": "已缩字",
+    "too_long": "超长",
+    "empty": "空",
+    "missing_glyph": "缺字",
+    "invalid": "无效",
+}
+"""状态短标签。
+
+结果表的状态列固定只有 4 个汉字宽，长句子一律走悬停提示，
+所以这里只放短标签，完整原因在 :attr:`FitResult.detail`。
+"""
+
+_SEVERITY = {
+    "ok": 0,
+    "spacing_compressed": 1,
+    "size_capped": 2,
+    "size_shrunk": 3,
+    "too_long": 4,
+    "empty": 8,
+    "missing_glyph": 8,
+    "invalid": 8,
+}
+
+_ATTENTION = {"spacing_compressed", "size_capped", "size_shrunk"}
+_BLOCKING = {"too_long", "empty", "missing_glyph", "invalid"}
+
+
+def _worse(a: str, b: str) -> str:
+    """取更严重的状态，用于一件事接一件事发生时的状态合并。"""
+    return a if _SEVERITY.get(a, 0) >= _SEVERITY.get(b, 0) else b
+
 
 def resolve_curve(face: FontFace, spec: StampSpec) -> tuple[float, float]:
     """决定 ``$fa`` / ``$fs``。
@@ -55,22 +106,46 @@ def resolve_curve(face: FontFace, spec: StampSpec) -> tuple[float, float]:
 
 @dataclass
 class FitResult:
+    """一个名字的求解结果。"""
+
     size_mm: float
     spacing: float
     width_mm: float
-    available_mm: float
-    fill_ratio: float
-    status: str
-    notes: list[str] = field(default_factory=list)
-    base_len_mm: float = 0.0
-    """这个名字对应的底座长度。
+    """文字墨迹宽度（毫米）。"""
 
-    ``fixed`` 模式下恒等于目标宽度；``auto`` 模式下逐名不同。
-    """
+    base_len_mm: float
+    """底座长度 = 文字宽 + 2 × 留白 + 2 × 加粗。"""
+
+    status: str = "ok"
+    notes: list[str] = field(default_factory=list)
+    limit_mm: float = 0.0
+    """底座长度上限（``spec.max_width_mm``），方便界面直接取用。"""
+
+    fill_ratio: float = 0.0
+    """文字宽占上限的比例。短名字会明显小于 1，这是正常的。"""
 
     @property
     def ok(self) -> bool:
-        return self.status not in {"empty", "missing_glyph", "too_long", "invalid"}
+        return self.status not in _BLOCKING
+
+    @property
+    def label(self) -> str:
+        """状态短标签（≤4 个汉字）。"""
+        return STATUS_LABELS.get(self.status, self.status)
+
+    @property
+    def detail(self) -> str:
+        """完整原因，用于日志与悬停提示。"""
+        return "；".join(self.notes) or self.label
+
+    @property
+    def needs_attention(self) -> bool:
+        """被压缩过，需要提醒用户。"""
+        return self.status in _ATTENTION
+
+    @property
+    def is_blocking(self) -> bool:
+        return self.status in _BLOCKING
 
 
 def ink_linear(metrics: FaceMetrics, text: str) -> tuple[float, float]:
@@ -109,6 +184,7 @@ def predict_width(
 
 
 def cap_height_mm(metrics: FaceMetrics, size_mm: float) -> float:
+    """字号对应的字高（毫米），含 OpenSCAD 的 4/3 放大。"""
     return metrics.cap_ratio() * size_mm * OPENSCAD_SIZE_SCALE
 
 
@@ -124,46 +200,59 @@ def text_offset_y(metrics: FaceMetrics, text: str, size_mm: float) -> float:
     return -metrics.ink_y_center(text) / metrics.upem * size_mm * INK_SCALE
 
 
-def size_limit_from_geometry(metrics: FaceMetrics, spec: StampSpec) -> float:
-    """由底座宽度反推允许的最大字号（保证字高不超出底座）。"""
+def size_cap_from_base(metrics: FaceMetrics, spec: StampSpec) -> float:
+    """由底座宽度反推字号硬上限。
+
+    字高（含加粗外扩 2 × weight）不得超过底座宽度，否则字母会悬在底座外。
+    这是**唯一**一条压字号的几何约束 —— 不再额外留 edge 余量，否则
+    「6mm 字号配 6mm 底座」这种一直能打的组合会被莫名其妙压到 5.71mm。
+    """
     cap_ratio = metrics.cap_ratio()
     if cap_ratio <= 0:
-        return spec.max_size_mm
-    usable = spec.base_width_mm - 2.0 * spec.edge_mm - 2.0 * max(0.0, spec.weight_offset_mm)
+        return float("inf")
+    usable = spec.base_width_mm - 2.0 * max(0.0, spec.weight_offset_mm)
     if usable <= 0:
-        return spec.hard_min_size_mm
+        return 0.0
     return usable / (cap_ratio * OPENSCAD_SIZE_SCALE)
 
 
-def size_bounds(metrics: FaceMetrics, spec: StampSpec) -> tuple[float, float]:
-    """实际可用的字号区间 (min, max)，已考虑底座几何约束。"""
-    geo_limit = size_limit_from_geometry(metrics, spec)
-    size_max = min(spec.max_size_mm, geo_limit)
-    size_min = min(spec.min_size_mm, size_max)
-    return size_min, size_max
-
-
-def solve_size(metrics: FaceMetrics, text: str, available_mm: float, spacing: float) -> float:
-    """在给定间距下，反解填满可用宽度所需的字号。"""
+def solve_size_for_width(
+    metrics: FaceMetrics,
+    text: str,
+    target_width_mm: float,
+    spacing: float,
+    weight_offset_mm: float = 0.0,
+) -> float:
+    """在给定间距下，反解正好占满目标宽度所需的字号。"""
     k, c = ink_linear(metrics, text)
     denom = k * spacing * ADVANCE_SCALE + c * INK_SCALE
     if denom <= 0:
         return 0.0
-    return available_mm / denom
+    usable = target_width_mm - 2.0 * max(0.0, weight_offset_mm)
+    if usable <= 0:
+        return 0.0
+    return usable / denom
 
 
-def solve_spacing(
-    metrics: FaceMetrics, text: str, available_mm: float, size_mm: float
+def solve_spacing_for_width(
+    metrics: FaceMetrics,
+    text: str,
+    target_width_mm: float,
+    size_mm: float,
+    weight_offset_mm: float = 0.0,
 ) -> float | None:
-    """在给定字号下，反解填满可用宽度所需的间距；单字符无法求解返回 None。"""
+    """在给定字号下，反解正好占满目标宽度所需的间距；单字符无法求解返回 None。"""
     k, c = ink_linear(metrics, text)
     if size_mm <= 0 or k <= 0:
         return None
-    return (available_mm / size_mm - c * INK_SCALE) / (k * ADVANCE_SCALE)
+    usable = target_width_mm - 2.0 * max(0.0, weight_offset_mm)
+    if usable <= 0:
+        return None
+    return (usable / size_mm - c * INK_SCALE) / (k * ADVANCE_SCALE)
 
 
 def size_from_probe(probe_width_mm: float, probe_size_mm: float, target_mm: float) -> float:
-    """由一次实测探针反推填满目标宽度所需的字号。
+    """由一次实测探针反推占满目标宽度所需的字号。
 
     宽度与字号严格成正比（已实测），因此单次探针即可得到精确字号，
     并且自动吸收字体 GPOS 字距调整带来的误差。
@@ -173,189 +262,143 @@ def size_from_probe(probe_width_mm: float, probe_size_mm: float, target_mm: floa
     return probe_size_mm * target_mm / probe_width_mm
 
 
-def underfill_note(spec: StampSpec, width_mm: float, available_mm: float) -> str:
-    """短名字填不满时的提示，带一个可执行的目标宽度建议。
+def probe_scale(
+    metrics: FaceMetrics, text: str, spacing: float, probe_width_mm: float, probe_size_mm: float
+) -> float:
+    """实测宽度 / 解析预测宽度。
 
-    单独抽成函数是因为批次会用实测值回填宽度，提示文案需要跟着刷新。
+    探针在 ``probe_size_mm`` 下渲染（无加粗），比值可以直接当作
+    「解析模型相对实测的系统性偏差」，后续用 ``width_scale`` 传回 :func:`fit`，
+    让压缩判断也建立在实测口径上。
     """
-    suggest = width_mm + 2.0 * spec.margin_mm + 2.0 * spec.weight_offset_mm
-    return (
-        f"成品仅 {width_mm:.1f}mm，未填满 {available_mm:.1f}mm；"
-        f"建议目标宽度改为约 {suggest:.1f}mm，或加大底座宽度以提高字号上限"
-    )
+    predicted = predict_width(metrics, text, probe_size_mm, spacing, 0.0)
+    if predicted <= 0 or probe_width_mm <= 0:
+        return 1.0
+    return probe_width_mm / predicted
 
 
-def fit(metrics: FaceMetrics, text: str, spec: StampSpec) -> FitResult:
-    """定宽自适应：求 (字号, 间距) 使文字尽量填满目标宽度。"""
+def fit(
+    metrics: FaceMetrics,
+    text: str,
+    spec: StampSpec,
+    width_scale: float = 1.0,
+) -> FitResult:
+    """限宽求解：字号尽量保持不变，超宽时先压间距、再缩字号。
+
+    ``width_scale`` 是实测探针给出的修正系数（实测宽 / 预测宽）。实现上
+    只是把「允许宽度」除以它，就等价于把所有预测宽度乘以它，逻辑无需改动。
+    """
     text = (text or "").strip()
-    available = spec.available_mm()
+    limit = spec.max_text_width()
+    weight = max(0.0, spec.weight_offset_mm)
+    spacing0 = spec.letter_spacing
 
     if not text:
-        return FitResult(0.0, spec.default_spacing, 0.0, available, 0.0, "empty", ["名字为空"])
+        return FitResult(0.0, spacing0, 0.0, 0.0, "empty", ["名字为空"], limit)
 
-    if available <= 0:
+    missing = metrics.missing_chars(text)
+    if missing:
+        return FitResult(
+            0.0, spacing0, 0.0, 0.0, "missing_glyph", [f"当前字体缺少字符：{''.join(missing)}"], limit
+        )
+
+    if limit <= 0:
         return FitResult(
             0.0,
-            spec.default_spacing,
+            spacing0,
             0.0,
-            available,
             0.0,
             "invalid",
-            [f"可用宽度为 {available:.2f}mm，请检查目标宽度与留白设置"],
-        )
-
-    missing = metrics.missing_chars(text)
-    if missing:
-        return FitResult(
-            0.0,
-            spec.default_spacing,
-            0.0,
-            available,
-            0.0,
-            "missing_glyph",
-            [f"当前字体缺少字符：{''.join(missing)}"],
+            [f"左右留白 2 × {spec.margin_mm:g}mm 已占满上限 {spec.max_width_mm:g}mm，请加大上限"],
+            limit,
         )
 
     k, c = ink_linear(metrics, text)
     if k <= 0 and c <= 0:
-        return FitResult(0.0, spec.default_spacing, 0.0, available, 0.0, "invalid", ["字体度量为空"])
+        return FitResult(0.0, spacing0, 0.0, 0.0, "invalid", ["字体度量为空"], limit)
+
+    scale = width_scale if width_scale > 0 else 1.0
+    # 预测宽 × scale ≤ limit  ⇔  预测宽 ≤ limit / scale
+    eff_limit = limit / scale
+
+    def width_at(size: float, spacing: float) -> float:
+        return predict_width(metrics, text, size, spacing, weight)
 
     notes: list[str] = []
-    size_min, size_max = size_bounds(metrics, spec)
-    geo_limit = size_limit_from_geometry(metrics, spec)
-    if geo_limit < spec.max_size_mm:
-        notes.append(f"字号上限受底座宽度约束，实际上限 {geo_limit:.2f}mm")
-
-    spacing = spec.default_spacing
     status = "ok"
-    size = solve_size(metrics, text, available, spacing)
+    size = spec.font_size_mm
+    spacing = spacing0
 
-    if size > size_max:
-        # 字太大：封顶后用间距补足
-        size = size_max
-        solved = solve_spacing(metrics, text, available, size)
-        if solved is None:
-            spacing = spec.default_spacing
-        elif solved > spec.max_spacing:
-            spacing = spec.max_spacing
-            status = "underfill"
-            notes.append("名字较短，间距已达上限")
-        else:
+    # ---- 第一步：字高不得超过底座宽 ----
+    cap = cap_height_mm(metrics, size)
+    total = cap + 2.0 * weight
+    if total > spec.base_width_mm + GEOMETRY_TOLERANCE_MM:
+        size = size_cap_from_base(metrics, spec)
+        status = _worse(status, "size_capped")
+        # 加粗会让墨迹上下各外扩 weight，必须一起算，否则文案会自相矛盾
+        # （"字高 5.88 超过 6.00" 这种）
+        shape = f"字高 {cap:.2f}mm" + (
+            f" 加加粗 {2.0 * weight:.2f}mm 共 {total:.2f}mm" if weight > 0 else ""
+        )
+        notes.append(
+            f"字号 {spec.font_size_mm:.2f}mm 的{shape}超过底座宽度 "
+            f"{spec.base_width_mm:.2f}mm，已压到 {size:.2f}mm；"
+            f"想用原字号请把底座宽度加到 {total:.2f}mm"
+        )
+
+    # ---- 第二步：超宽则先压间距 ----
+    raw = width_at(size, spacing)
+    if raw > eff_limit + 1e-9:
+        floor = min(spacing0, spec.min_spacing)
+        solved = solve_spacing_for_width(metrics, text, eff_limit, size, weight)
+        if solved is not None and solved >= floor:
             spacing = solved
-    elif size < size_min:
-        # 字太小：托底后用压缩间距补偿
-        size = size_min
-        solved = solve_spacing(metrics, text, available, size)
-        if solved is not None and solved >= spec.min_spacing:
-            spacing = solved
+            status = _worse(status, "spacing_compressed")
+            notes.append(
+                f"名字偏长，间距从 {spacing0:.2f} 压到 {spacing:.2f}，"
+                f"以适配上限 {spec.max_width_mm:g}mm"
+            )
         else:
-            spacing = spec.min_spacing
-            shrunk = solve_size(metrics, text, available, spacing)
-            if shrunk >= size_min:
-                size = shrunk
-            elif shrunk >= spec.hard_min_size_mm:
-                size = shrunk
-                status = "spacing_min"
-                notes.append("间距已压到下限，字号相应缩小")
+            spacing = floor
+            # ---- 第三步：间距压到底还超，才缩字号 ----
+            if width_at(size, spacing) > eff_limit + 1e-9:
+                solved_size = solve_size_for_width(metrics, text, eff_limit, spacing, weight)
+                if solved_size >= spec.hard_min_size_mm:
+                    size = solved_size
+                    status = _worse(status, "size_shrunk")
+                    notes.append(
+                        f"间距已压到下限 {spacing:.2f}，字号再缩到 {size:.2f}mm "
+                        f"才放进 {spec.max_width_mm:g}mm"
+                    )
+                else:
+                    size = spec.hard_min_size_mm
+                    status = "too_long"
+                    need = width_at(size, spacing) * scale
+                    suggest = spec.base_len_for(need)
+                    notes.append(
+                        f"名字过长：字号缩到下限 {spec.hard_min_size_mm:.2f}mm、"
+                        f"间距压到 {spacing:.2f} 仍需 {need:.2f}mm，"
+                        f"超过上限 {spec.max_width_mm:g}mm；"
+                        f"建议把上限加到 {suggest:.1f}mm 或缩短名字"
+                    )
             else:
-                size = spec.hard_min_size_mm
-                status = "too_long"
-                needed = predict_width(
-                    metrics, text, spec.hard_min_size_mm, spec.min_spacing, spec.weight_offset_mm
-                )
-                suggest = needed + 2.0 * spec.margin_mm + 2.0 * spec.weight_offset_mm
+                status = _worse(status, "spacing_compressed")
                 notes.append(
-                    f"名字过长：最小字号 {spec.hard_min_size_mm:.1f}mm 下仍需 "
-                    f"{needed:.1f}mm，建议底座宽度不小于 {suggest:.1f}mm"
+                    f"名字偏长，间距从 {spacing0:.2f} 压到 {spacing:.2f}，"
+                    f"以适配上限 {spec.max_width_mm:g}mm"
                 )
 
-    width = predict_width(metrics, text, size, spacing, spec.weight_offset_mm)
-    fill = width / available if available > 0 else 0.0
-
-    if status == "underfill":
-        # 给出可执行的下一步：要么把底座改短，要么把底座加宽换更大的字号
-        notes.append(underfill_note(spec, width, available))
-
-    return FitResult(
-        size_mm=round(size, 3),
-        spacing=round(spacing, 3),
-        width_mm=round(width, 3),
-        available_mm=round(available, 3),
-        fill_ratio=round(fill, 4),
-        status=status,
-        notes=notes,
-        base_len_mm=round(spec.target_width_mm, 3),
-    )
-
-
-def fit_auto(metrics: FaceMetrics, text: str, spec: StampSpec) -> FitResult:
-    """定字号自适应宽度：字号与间距固定，算出成品宽度与底座长度。
-
-    这是旧版 ``batch_3Dnames.py`` 的行为 —— 字始终一样大，底座随名字长短伸缩。
-    区别在于旧版按字符数查表（2→18mm、3→24mm、5→36mm）估长度，这里直接用
-    字体度量精算墨迹宽度，批次生成时还会用一次实测探针把误差压到 0.02mm 级。
-
-    字号仍受底座宽度约束：字高不能超过底座宽，否则字母会悬在底座外。
-    """
-    text = (text or "").strip()
-    if not text:
-        return FitResult(0.0, spec.auto_spacing, 0.0, 0.0, 0.0, "empty", ["名字为空"])
-
-    missing = metrics.missing_chars(text)
-    if missing:
-        return FitResult(
-            0.0,
-            spec.auto_spacing,
-            0.0,
-            0.0,
-            0.0,
-            "missing_glyph",
-            [f"当前字体缺少字符：{''.join(missing)}"],
-        )
-
-    k, c = ink_linear(metrics, text)
-    if k <= 0 and c <= 0:
-        return FitResult(0.0, spec.auto_spacing, 0.0, 0.0, 0.0, "invalid", ["字体度量为空"])
-
-    notes: list[str] = []
-    size = spec.auto_size_mm
-    spacing = spec.auto_spacing
-    status = "ok"
-
-    # 这里只认"字高不得超过底座宽"这条硬约束，不套用 fixed 模式的 edge_mm 舒适余量。
-    # 原因：fixed 模式的字号是算出来的，留 0.2mm 余量合理；auto 模式的字号是用户
-    # 指定的（旧版一直是 6mm 字配 6mm 底座，字高 5.88mm 贴边但能打印），
-    # 再按 0.2mm 余量去压，会莫名其妙把 6mm 变成 5.71mm。
-    cap_ratio = metrics.cap_ratio()
-    hard_limit = (
-        spec.base_width_mm / (cap_ratio * OPENSCAD_SIZE_SCALE) if cap_ratio > 0 else spec.max_size_mm
-    )
-    if size > hard_limit:
-        cap = cap_height_mm(metrics, size)
-        need_base_w = cap
-        notes.append(
-            f"字号 {size:.2f}mm 的字高 {cap:.2f}mm 超出底座宽度 {spec.base_width_mm:.2f}mm，"
-            f"已压到 {hard_limit:.2f}mm；想用原字号请把底座宽度加到 {need_base_w:.2f}mm"
-        )
-        size = hard_limit
-        status = "size_capped"
-    elif size < spec.hard_min_size_mm:
-        notes.append(
-            f"字号 {size:.2f}mm 低于可成形下限 {spec.hard_min_size_mm:.2f}mm，"
-            f"字形可能糊在一起"
-        )
-        status = "size_too_small"
-
-    width = predict_width(metrics, text, size, spacing, spec.weight_offset_mm)
+    width = width_at(size, spacing) * scale
     base_len = spec.base_len_for(width)
+    fill = width / limit if limit > 0 else 0.0
 
     return FitResult(
         size_mm=round(size, 3),
         spacing=round(spacing, 3),
         width_mm=round(width, 3),
-        available_mm=round(width, 3),
-        fill_ratio=1.0,
+        base_len_mm=round(base_len, 3),
         status=status,
         notes=notes,
-        base_len_mm=round(base_len, 3),
+        limit_mm=limit,
+        fill_ratio=round(fill, 4),
     )

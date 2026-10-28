@@ -1,31 +1,42 @@
 """Tkinter 图形界面。
 
-设计目标：一次配置、反复使用。参数区在左，预览与日志在右，
+布局分五块（自上而下）：
+
+1. 印章几何：底座宽/高、最长不超过、左右留白、字体高度
+2. 字体：字体/字重/字号/字间距/几何加粗/大小写 + 实时预览条
+3. 配置（自动探测，左）与名字清单（右，带行号可粘贴）
+4. 结果预览表 + 运行日志
+5. 底部操作栏
+
+参数一改就自动刷新（250ms 防抖），不需要「预览拟合」按钮；
 所有设置写入 ``stampgen_config.json``，下次启动自动恢复。
 """
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import traceback
 import webbrowser
 from pathlib import Path
-from typing import Callable
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from .. import batch as batch_mod
-from .. import metrics, openscad, paths, validate
-from ..config import AppConfig, load_config, save_config
-from ..fonts import FontLibrary
+from .. import metrics, paths, validate
+from ..config import CASE_LABELS, AppConfig, load_config, save_config
+from ..fonts import FontFace, FontLibrary
+from . import fontpreview
 
 APP_TITLE = "名字印章生成器"
 COLOR_OK = "#0f6e56"
 COLOR_WARN = "#854f0b"
 COLOR_ERR = "#a32d2d"
 COLOR_MUTED = "#5f5e5a"
+COLOR_PREVIEW_BG = "#fbfbf9"
+COLOR_PREVIEW_BORDER = "#d8d8d4"
 
 BUILTIN_TEMPLATE_LABEL = "（内置模板）"
 """打包运行时内置模板在 %TEMP%\\_MEIxxxxx\\ 里，路径每次启动都变。
@@ -33,6 +44,9 @@ BUILTIN_TEMPLATE_LABEL = "（内置模板）"
 界面上直接显示那个临时路径会让人以为要维护它，所以只显示这个占位文案；
 用户真要自定义模板，点「选择文件」指到自己的 .scad 即可。
 """
+
+STATUS_MAX_CHARS = 66
+"""状态栏最多显示的字数。超出截断并加省略号 —— 完整信息看日志。"""
 
 
 def _enable_dpi_awareness() -> None:
@@ -45,6 +59,17 @@ def _enable_dpi_awareness() -> None:
         pass
 
 
+def _read_text_file(path: Path) -> str:
+    """读文本，UTF-8 优先，失败退回 GBK（老 txt 常是 GBK）。"""
+    raw = path.read_bytes()
+    for encoding in ("utf-8-sig", "utf-8", "gbk"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 class StampApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -54,9 +79,19 @@ class StampApp:
         self.cancel = threading.Event()
         self.worker: threading.Thread | None = None
 
+        self._names_source_txt = ""
+        """名字清单来自哪个 txt；为空表示用户直接粘贴的。决定输出目录命名。"""
+
+        self._preview_photo = None
+        self._row_detail: dict[str, str] = {}
+        self._hover_iid = ""
+        self._tip: tk.Toplevel | None = None
+        self._preview_job: str | None = None
+        self._persist_job: str | None = None
+
         root.title(APP_TITLE)
-        root.geometry("1120x800")
-        root.minsize(980, 700)
+        root.geometry("1160x880")
+        root.minsize(1040, 780)
         self._set_icon()
 
         self._build_vars()
@@ -81,26 +116,33 @@ class StampApp:
 
     def _build_vars(self) -> None:
         spec = self.cfg.spec
-        self.var_family = tk.StringVar()
-        self.var_style = tk.StringVar()
-        self.var_mode = tk.StringVar(value=spec.width_mode)
-        self.var_width = tk.StringVar(value=f"{spec.target_width_mm:g}")
-        self.var_auto_size = tk.StringVar(value=f"{spec.auto_size_mm:g}")
-        self.var_auto_spacing = tk.StringVar(value=f"{spec.auto_spacing:g}")
-        self.var_margin = tk.StringVar(value=f"{spec.margin_mm:g}")
-        self.var_min_size = tk.StringVar(value=f"{spec.min_size_mm:g}")
-        self.var_max_size = tk.StringVar(value=f"{spec.max_size_mm:g}")
-        self.var_weight = tk.StringVar(value=f"{spec.weight_offset_mm:g}")
+
+        # 印章几何
         self.var_base_w = tk.StringVar(value=f"{spec.base_width_mm:g}")
         self.var_base_h = tk.StringVar(value=f"{spec.base_height_mm:g}")
+        self.var_max_w = tk.StringVar(value=f"{spec.max_width_mm:g}")
+        self.var_margin = tk.StringVar(value=f"{spec.margin_mm:g}")
         self.var_letter_h = tk.StringVar(value=f"{spec.letter_height_mm:g}")
+
+        # 字体
+        self.var_family = tk.StringVar()
+        self.var_style = tk.StringVar()
+        self.var_size = tk.StringVar(value=f"{spec.font_size_mm:g}")
+        self.var_spacing = tk.StringVar(value=f"{spec.letter_spacing:g}")
+        self.var_weight = tk.StringVar(value=f"{spec.weight_offset_mm:g}")
+        self.var_case = tk.StringVar(value=CASE_LABELS.get(spec.effective_case(), "保持原样"))
+        self._case_label_to_key = {v: k for k, v in CASE_LABELS.items()}
+
+        # 其它
         self.var_workers = tk.StringVar(
             value="" if not self.cfg.workers else str(self.cfg.workers)
         )
-        self.var_names = tk.StringVar()
         self.var_outroot = tk.StringVar()
+        self.var_out_hint = tk.StringVar(value="实际输出：—")
+        self.var_open_after = tk.BooleanVar(value=self.cfg.open_output_after_run)
         self.var_status = tk.StringVar(value="就绪")
-        # 这两项留空表示"用默认值"，界面显示的是当前实际生效的路径
+        self.var_names_stat = tk.StringVar(value="共 0 个")
+
         self.var_openscad = tk.StringVar(
             value=self.cfg.openscad_path or str(paths.default_openscad())
         )
@@ -113,174 +155,294 @@ class StampApp:
             tpl_display = str(paths.scad_template())
         self.var_template = tk.StringVar(value=tpl_display)
 
+        # 「采用」按钮按字段名改对应的输入框
+        self._spec_vars = {
+            "base_width_mm": self.var_base_w,
+            "base_height_mm": self.var_base_h,
+            "max_width_mm": self.var_max_w,
+            "margin_mm": self.var_margin,
+            "letter_height_mm": self.var_letter_h,
+            "font_size_mm": self.var_size,
+            "letter_spacing": self.var_spacing,
+            "weight_offset_mm": self.var_weight,
+        }
+
     # ---------------- 界面 ----------------
 
     def _build_ui(self) -> None:
-        outer = ttk.Frame(self.root, padding=12)
+        outer = ttk.Frame(self.root, padding=(12, 10, 12, 8))
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(3, weight=1)
+        outer.rowconfigure(4, weight=1)
 
-        self._build_params(outer).grid(row=0, column=0, sticky="we")
-        self._build_files(outer).grid(row=1, column=0, sticky="we", pady=(10, 6))
-        self._build_actions(outer).grid(row=2, column=0, sticky="we", pady=(0, 8))
-        self._build_body(outer).grid(row=3, column=0, sticky="nsew")
+        self._build_geometry(outer).grid(row=0, column=0, sticky="we")
+        self._build_font(outer).grid(row=1, column=0, sticky="we", pady=(8, 0))
+        self.hint_frame = ttk.Frame(outer)
+        self.hint_frame.grid(row=2, column=0, sticky="we", pady=(6, 0))
+        self._build_sources(outer).grid(row=3, column=0, sticky="we", pady=(8, 0))
+        self._build_body(outer).grid(row=4, column=0, sticky="nsew", pady=(8, 0))
+        self._build_actions(outer).grid(row=5, column=0, sticky="we", pady=(8, 0))
 
-    def _build_params(self, parent: ttk.Frame) -> ttk.Widget:
-        box = ttk.LabelFrame(parent, text=" 印章参数 ", padding=10)
-        for col in (1, 3, 5):
-            box.columnconfigure(col, weight=1)
+    def _entry(self, parent: ttk.Frame, var: tk.StringVar, width: int = 9) -> ttk.Entry:
+        ent = ttk.Entry(parent, textvariable=var, width=width)
+        ent.bind("<FocusOut>", lambda _e: self._schedule_preview())
+        ent.bind("<Return>", lambda _e: self._schedule_preview())
+        return ent
 
-        ttk.Label(box, text="字体").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=4)
-        self.cmb_family = ttk.Combobox(box, textvariable=self.var_family, state="readonly", width=22)
-        self.cmb_family.grid(row=0, column=1, sticky="we", pady=4)
+    def _build_geometry(self, parent: ttk.Frame) -> ttk.Widget:
+        box = ttk.LabelFrame(parent, text=" 印章几何 ", padding=(10, 6))
+        pairs = [
+            ("底座宽度 mm", self.var_base_w),
+            ("底座高度 mm", self.var_base_h),
+            ("最长不超过 mm", self.var_max_w),
+            ("左右留白 mm", self.var_margin),
+            ("字体高度 mm", self.var_letter_h),
+        ]
+        col = 0
+        for i, (label, var) in enumerate(pairs):
+            ttk.Label(box, text=label).grid(
+                row=0, column=col, sticky="e", padx=(0 if i == 0 else 16, 6), pady=2
+            )
+            self._entry(box, var).grid(row=0, column=col + 1, sticky="w", pady=2)
+            col += 2
+        ttk.Label(
+            box,
+            text="底座长度按名字自动算，短名字不会硬撑到上限",
+            foreground=COLOR_MUTED,
+        ).grid(row=0, column=col, sticky="w", padx=(20, 0), pady=2)
+        return box
+
+    def _build_font(self, parent: ttk.Frame) -> ttk.Widget:
+        box = ttk.LabelFrame(parent, text=" 字体 ", padding=(10, 6))
+        # 最后一列吃掉多余宽度，预览条才能铺满
+        box.columnconfigure(11, weight=1)
+
+        ttk.Label(box, text="字体").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=2)
+        self.cmb_family = ttk.Combobox(
+            box, textvariable=self.var_family, state="readonly", width=20
+        )
+        self.cmb_family.grid(row=0, column=1, sticky="w", pady=2)
         self.cmb_family.bind("<<ComboboxSelected>>", lambda _e: self._refresh_styles())
 
-        ttk.Label(box, text="字重").grid(row=0, column=2, sticky="e", padx=(14, 6), pady=4)
-        self.cmb_style = ttk.Combobox(box, textvariable=self.var_style, state="readonly", width=14)
-        self.cmb_style.grid(row=0, column=3, sticky="we", pady=4)
+        ttk.Label(box, text="字重").grid(row=0, column=2, sticky="e", padx=(16, 6), pady=2)
+        self.cmb_style = ttk.Combobox(
+            box, textvariable=self.var_style, state="readonly", width=11
+        )
+        self.cmb_style.grid(row=0, column=3, sticky="w", pady=2)
         self.cmb_style.bind("<<ComboboxSelected>>", lambda _e: self._schedule_preview())
 
-        ttk.Label(box, text="几何加粗 mm").grid(row=0, column=4, sticky="e", padx=(14, 6), pady=4)
+        ttk.Label(box, text="字号 mm").grid(row=0, column=4, sticky="e", padx=(16, 6), pady=2)
+        self._entry(box, self.var_size, 7).grid(row=0, column=5, sticky="w", pady=2)
+
+        ttk.Label(box, text="字间距").grid(row=0, column=6, sticky="e", padx=(16, 6), pady=2)
+        self._entry(box, self.var_spacing, 7).grid(row=0, column=7, sticky="w", pady=2)
+
+        ttk.Label(box, text="几何加粗 mm").grid(row=0, column=8, sticky="e", padx=(16, 6), pady=2)
         spin_weight = ttk.Spinbox(
             box,
             textvariable=self.var_weight,
             from_=0.0,
             to=0.3,
             increment=0.02,
-            width=8,
+            width=7,
             command=self._schedule_preview,
         )
-        spin_weight.grid(row=0, column=5, sticky="w", pady=4)
+        spin_weight.grid(row=0, column=9, sticky="w", pady=2)
         spin_weight.bind("<FocusOut>", lambda _e: self._schedule_preview())
 
-        ttk.Label(box, text="宽度模式").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=4)
-        mode_box = ttk.Frame(box)
-        mode_box.grid(row=1, column=1, columnspan=5, sticky="w", pady=4)
-        ttk.Radiobutton(
-            mode_box,
-            text="固定字号 → 自适应宽度（字一样大，底座随名字变）",
-            value="auto",
-            variable=self.var_mode,
-            command=self._on_mode_change,
-        ).pack(side="left")
-        ttk.Radiobutton(
-            mode_box,
-            text="固定宽度 → 自适应字号（成品一样宽）",
-            value="fixed",
-            variable=self.var_mode,
-            command=self._on_mode_change,
-        ).pack(side="left", padx=(18, 0))
-
-        ttk.Label(box, text="目标宽度 mm").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=4)
-        self.ent_width = ttk.Entry(box, textvariable=self.var_width)
-        self.ent_width.grid(row=2, column=1, sticky="we", pady=4)
-        self.ent_width.bind("<FocusOut>", lambda _e: self._schedule_preview())
-
-        ttk.Label(box, text="固定字号 mm").grid(row=2, column=2, sticky="e", padx=(14, 6), pady=4)
-        self.ent_auto_size = ttk.Entry(box, textvariable=self.var_auto_size)
-        self.ent_auto_size.grid(row=2, column=3, sticky="we", pady=4)
-        self.ent_auto_size.bind("<FocusOut>", lambda _e: self._schedule_preview())
-
-        ttk.Label(box, text="字间距").grid(row=2, column=4, sticky="e", padx=(14, 6), pady=4)
-        self.ent_auto_spacing = ttk.Entry(box, textvariable=self.var_auto_spacing)
-        self.ent_auto_spacing.grid(row=2, column=5, sticky="we", pady=4)
-        self.ent_auto_spacing.bind("<FocusOut>", lambda _e: self._schedule_preview())
-
-        ttk.Label(box, text="左右留白 mm").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=4)
-        ent_margin = ttk.Entry(box, textvariable=self.var_margin)
-        ent_margin.grid(row=3, column=1, sticky="we", pady=4)
-        ent_margin.bind("<FocusOut>", lambda _e: self._schedule_preview())
-
-        ttk.Label(box, text="字号范围 mm").grid(row=3, column=2, sticky="e", padx=(14, 6), pady=4)
-        self.range_box = ttk.Frame(box)
-        self.range_box.grid(row=3, column=3, sticky="we", pady=4)
-        self.ent_min_size = ttk.Entry(self.range_box, textvariable=self.var_min_size, width=6)
-        self.ent_min_size.pack(side="left")
-        ttk.Label(self.range_box, text=" ~ ").pack(side="left")
-        self.ent_max_size = ttk.Entry(self.range_box, textvariable=self.var_max_size, width=6)
-        self.ent_max_size.pack(side="left")
-        for widget in (self.ent_min_size, self.ent_max_size):
-            widget.bind("<FocusOut>", lambda _e: self._schedule_preview())
-
-        ttk.Label(box, text="底座 宽/高/字高").grid(row=3, column=4, sticky="e", padx=(14, 6), pady=4)
-        base_box = ttk.Frame(box)
-        base_box.grid(row=3, column=5, sticky="we", pady=4)
-        for var in (self.var_base_w, self.var_base_h, self.var_letter_h):
-            ent = ttk.Entry(base_box, textvariable=var, width=7)
-            ent.pack(side="left", padx=(0, 4))
-            ent.bind("<FocusOut>", lambda _e: self._schedule_preview())
-
-        ttk.Label(box, text="同时生成").grid(row=4, column=0, sticky="w", padx=(0, 6), pady=4)
-        self.spin_workers = ttk.Spinbox(
+        ttk.Label(box, text="大小写").grid(row=0, column=10, sticky="e", padx=(16, 6), pady=2)
+        self.cmb_case = ttk.Combobox(
             box,
-            textvariable=self.var_workers,
-            from_=0,
-            to=16,
-            increment=1,
-            width=8,
+            textvariable=self.var_case,
+            state="readonly",
+            width=11,
+            values=[CASE_LABELS[k] for k in ("keep", "upper", "capitalize", "lower")],
         )
-        self.spin_workers.grid(row=4, column=1, sticky="w", pady=4)
-        self.spin_workers.bind("<FocusOut>", lambda _e: self._schedule_preview())
+        self.cmb_case.grid(row=0, column=11, sticky="w", pady=2)
+        self.cmb_case.bind("<<ComboboxSelected>>", lambda _e: self._schedule_preview())
 
-        self.lbl_hint = ttk.Label(box, text="", foreground=COLOR_MUTED, wraplength=520, justify="left")
-        self.lbl_hint.grid(row=4, column=2, columnspan=4, sticky="w", padx=(14, 0), pady=4)
+        # 固定高度的预览容器：图换尺寸时布局不跳
+        self.preview_holder = tk.Frame(
+            box,
+            height=78,
+            background=COLOR_PREVIEW_BG,
+            highlightthickness=1,
+            highlightbackground=COLOR_PREVIEW_BORDER,
+        )
+        self.preview_holder.grid(
+            row=1, column=0, columnspan=12, sticky="we", pady=(8, 0)
+        )
+        self.preview_holder.pack_propagate(False)
+        self.lbl_preview = tk.Label(
+            self.preview_holder,
+            bd=0,
+            anchor="w",
+            background=COLOR_PREVIEW_BG,
+            foreground=COLOR_MUTED,
+            text="选择字体后这里显示预览",
+        )
+        self.lbl_preview.pack(fill="both", expand=True, padx=6, pady=2)
 
-        self._on_mode_change(quiet=True)
+        ttk.Label(
+            box,
+            text="预览只反映字形观感；成品尺寸以生成时的实测探针为准",
+            foreground=COLOR_MUTED,
+        ).grid(row=2, column=0, columnspan=12, sticky="w", pady=(4, 0))
         return box
 
-    def _on_mode_change(self, quiet: bool = False) -> None:
-        """按当前宽度模式启用/禁用对应的输入框。"""
-        auto = self.var_mode.get() == "auto"
-        normal, disabled = "normal", "disabled"
-        self.ent_width.configure(state=disabled if auto else normal)
-        self.ent_auto_size.configure(state=normal if auto else disabled)
-        self.ent_auto_spacing.configure(state=normal if auto else disabled)
-        # 字号范围只在 fixed 模式下参与求解；auto 模式字号是直接指定的
-        for widget in (self.ent_min_size, self.ent_max_size):
-            widget.configure(state=disabled if auto else normal)
-        if auto:
-            self.lbl_hint.configure(
-                text="字号固定，底座长度按每个名字的实测字宽自动算（字高不得超过底座宽）。"
-            )
-        else:
-            self.lbl_hint.configure(
-                text="字号上限同时受「底座宽度」约束：字高不得超过底座宽，否则字母会悬空。"
-            )
-        if not quiet:
-            self._schedule_preview()
+    def _build_sources(self, parent: ttk.Frame) -> ttk.Widget:
+        wrap = ttk.Frame(parent)
+        wrap.columnconfigure(0, weight=0, minsize=520)
+        wrap.columnconfigure(1, weight=1)
+        wrap.rowconfigure(0, weight=1)
 
-    def _build_files(self, parent: ttk.Frame) -> ttk.Widget:
-        box = ttk.Frame(parent)
-        box.columnconfigure(1, weight=1)
+        left = ttk.LabelFrame(wrap, text=" 配置（自动探测） ", padding=(10, 6))
+        left.grid(row=0, column=0, sticky="nsew")
+        left.columnconfigure(1, weight=1)
 
-        ttk.Label(box, text="名字清单", width=10).grid(row=0, column=0, sticky="w", pady=3)
-        ent_names = ttk.Entry(box, textvariable=self.var_names)
-        ent_names.grid(row=0, column=1, sticky="we", pady=3)
-        ttk.Button(box, text="选择文件", width=10, command=self._pick_names).grid(
-            row=0, column=2, padx=(6, 0), pady=3
+        rows = [
+            ("OpenSCAD", self.var_openscad, self._pick_openscad),
+            ("模板 scad", self.var_template, self._pick_template),
+            ("输出目录", self.var_outroot, self._pick_outroot),
+        ]
+        for i, (label, var, command) in enumerate(rows):
+            ttk.Label(left, text=label).grid(row=i, column=0, sticky="w", pady=3)
+            ent = ttk.Entry(left, textvariable=var)
+            ent.grid(row=i, column=1, sticky="we", pady=3, padx=(6, 6))
+            ttk.Button(left, text="选择", width=6, command=command).grid(row=i, column=2, pady=3)
+            if var is self.var_outroot:
+                # 手改路径后「实际输出」要跟着变
+                ent.bind("<FocusOut>", lambda _e: self._refresh_output_label())
+                ent.bind("<Return>", lambda _e: self._refresh_output_label())
+
+        opt = ttk.Frame(left)
+        opt.grid(row=3, column=0, columnspan=3, sticky="we", pady=(6, 0))
+        ttk.Checkbutton(
+            opt,
+            text="完成后自动打开输出文件夹",
+            variable=self.var_open_after,
+        ).pack(side="left")
+        ttk.Label(opt, text="同时生成").pack(side="left", padx=(18, 6))
+        spin_workers = ttk.Spinbox(
+            opt, textvariable=self.var_workers, from_=0, to=16, increment=1, width=5
         )
-        self._bind_drop(ent_names)
+        spin_workers.pack(side="left")
+        ttk.Label(opt, text="个（0=自动）", foreground=COLOR_MUTED).pack(side="left", padx=(6, 0))
 
-        ttk.Label(box, text="输出目录", width=10).grid(row=1, column=0, sticky="w", pady=3)
-        ttk.Entry(box, textvariable=self.var_outroot).grid(row=1, column=1, sticky="we", pady=3)
-        ttk.Button(box, text="选择目录", width=10, command=self._pick_outroot).grid(
-            row=1, column=2, padx=(6, 0), pady=3
-        )
+        ttk.Label(
+            left, textvariable=self.var_out_hint, foreground=COLOR_MUTED, anchor="w"
+        ).grid(row=4, column=0, columnspan=3, sticky="we", pady=(6, 0))
 
-        # 以下两项一般不用改：留默认值即可，换机器/移动 exe 后会自动重新探测
-        ttk.Label(box, text="OpenSCAD", width=10).grid(row=2, column=0, sticky="w", pady=3)
-        ttk.Entry(box, textvariable=self.var_openscad).grid(row=2, column=1, sticky="we", pady=3)
-        ttk.Button(box, text="选择文件", width=10, command=self._pick_openscad).grid(
-            row=2, column=2, padx=(6, 0), pady=3
-        )
+        right = ttk.LabelFrame(wrap, text=" 名字清单 ", padding=(10, 6))
+        right.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
 
-        ttk.Label(box, text="模板 scad", width=10).grid(row=3, column=0, sticky="w", pady=3)
-        ttk.Entry(box, textvariable=self.var_template).grid(row=3, column=1, sticky="we", pady=3)
-        ttk.Button(box, text="选择文件", width=10, command=self._pick_template).grid(
-            row=3, column=2, padx=(6, 0), pady=3
+        bar = ttk.Frame(right)
+        bar.grid(row=0, column=0, sticky="we", pady=(0, 5))
+        ttk.Button(bar, text="选择 txt 文件", width=13, command=self._pick_names).pack(side="left")
+        ttk.Label(bar, textvariable=self.var_names_stat, foreground=COLOR_MUTED).pack(
+            side="left", padx=(10, 0)
         )
-        return box
+        ttk.Label(
+            bar, text="也可直接粘贴，一行一个名字", foreground=COLOR_MUTED
+        ).pack(side="right")
+
+        edit = ttk.Frame(right)
+        edit.grid(row=1, column=0, sticky="nsew")
+        edit.columnconfigure(1, weight=1)
+        edit.rowconfigure(0, weight=1)
+
+        # 左侧行号列：禁用、灰底、不参与 Tab 焦点。
+        # height 必须给 1 —— 默认 24 行会把整个区块撑到 400px 高。
+        self.txt_lineno = tk.Text(
+            edit,
+            width=4,
+            height=1,
+            state="disabled",
+            background="#f0f0ee",
+            foreground=COLOR_MUTED,
+            relief="flat",
+            borderwidth=0,
+            takefocus=0,
+            wrap="none",
+        )
+        self.txt_lineno.grid(row=0, column=0, sticky="ns")
+
+        self.txt_names = tk.Text(edit, height=5, wrap="none", undo=True, relief="solid", borderwidth=1)
+        self.txt_names.grid(row=0, column=1, sticky="nsew")
+
+        self.names_scroll = ttk.Scrollbar(edit, orient="vertical")
+        self.names_scroll.grid(row=0, column=2, sticky="ns")
+        self.txt_names.configure(yscrollcommand=self._on_names_scroll)
+        self.names_scroll.configure(command=self.txt_names.yview)
+
+        self.txt_names.bind("<KeyRelease>", lambda _e: self._on_names_changed())
+        self.txt_names.bind("<<Paste>>", lambda _e: self.root.after(10, self._on_names_changed))
+        self.txt_names.bind("<<Cut>>", lambda _e: self.root.after(10, self._on_names_changed))
+        self.txt_names.bind("<ButtonRelease-1>", lambda _e: self._redraw_line_numbers())
+        self.txt_names.bind("<MouseWheel>", lambda _e: self.root.after(1, self._redraw_line_numbers))
+        self._bind_drop(self.txt_names)
+        return wrap
+
+    def _build_body(self, parent: ttk.Frame) -> ttk.Widget:
+        paned = ttk.Panedwindow(parent, orient=tk.VERTICAL)
+
+        result_box = ttk.LabelFrame(paned, text=" 结果预览 ", padding=(8, 6))
+        cols = ("no", "name", "chars", "size", "spacing", "base_len", "status", "spacer")
+        headings = {
+            "no": ("序号", 44, "center", False),
+            "name": ("名字", 260, "w", False),
+            "chars": ("字符", 46, "center", False),
+            "size": ("字号 mm", 68, "center", False),
+            "spacing": ("间距", 56, "center", False),
+            "base_len": ("底座长 mm", 84, "center", False),
+            "status": ("状态", 74, "center", False),
+            # 占位列：把多余宽度收在表格最右侧，名字列就不会被拉成一片空白
+            "spacer": ("", 20, "w", True),
+        }
+        self.tree = ttk.Treeview(result_box, columns=cols, show="headings", height=8)
+        for key in cols:
+            text, width, anchor, stretch = headings[key]
+            self.tree.heading(key, text=text)
+            self.tree.column(key, width=width, anchor=anchor, stretch=stretch)
+        self.tree.tag_configure("warn", foreground=COLOR_WARN)
+        self.tree.tag_configure("err", foreground=COLOR_ERR)
+        self.tree.tag_configure("ok", foreground=COLOR_OK)
+        self.tree.bind("<Motion>", self._on_tree_motion)
+        self.tree.bind("<Leave>", lambda _e: self._hide_tip())
+        self.tree.bind("<ButtonPress>", lambda _e: self._hide_tip())
+        scroll = ttk.Scrollbar(result_box, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill=tk.BOTH, expand=True)
+        scroll.pack(side="right", fill="y")
+        paned.add(result_box, weight=3)
+
+        log_box = ttk.LabelFrame(paned, text=" 运行日志 ", padding=(8, 6))
+        self.txt_log = tk.Text(log_box, height=8, wrap="word", state="disabled")
+        log_scroll = ttk.Scrollbar(log_box, orient="vertical", command=self.txt_log.yview)
+        self.txt_log.configure(yscrollcommand=log_scroll.set)
+        self.txt_log.pack(side="left", fill=tk.BOTH, expand=True)
+        log_scroll.pack(side="right", fill="y")
+        paned.add(log_box, weight=2)
+        return paned
+
+    def _build_actions(self, parent: ttk.Frame) -> ttk.Widget:
+        bar = ttk.Frame(parent)
+        self.btn_start = ttk.Button(bar, text="开始生成", command=self.start, width=12)
+        self.btn_start.pack(side="left")
+        self.btn_cancel = ttk.Button(
+            bar, text="取消", command=self.cancel_run, state="disabled", width=8
+        )
+        self.btn_cancel.pack(side="left", padx=(8, 0))
+
+        self.progress = ttk.Progressbar(bar, mode="determinate", length=180)
+        self.progress.pack(side="right")
+        self.lbl_status = ttk.Label(
+            bar, textvariable=self.var_status, foreground=COLOR_MUTED, anchor="e"
+        )
+        self.lbl_status.pack(side="right", padx=(0, 10))
+        return bar
 
     def _bind_drop(self, widget: tk.Widget) -> None:
         try:
@@ -291,62 +453,10 @@ class StampApp:
         except Exception:
             pass
 
-    def _build_actions(self, parent: ttk.Frame) -> ttk.Widget:
-        bar = ttk.Frame(parent)
-        ttk.Button(bar, text="预览拟合", command=self.preview).pack(side="left")
-        self.btn_start = ttk.Button(bar, text="开始生成", command=self.start)
-        self.btn_start.pack(side="left", padx=(8, 0))
-        self.btn_cancel = ttk.Button(bar, text="取消", command=self.cancel_run, state="disabled")
-        self.btn_cancel.pack(side="left", padx=(8, 0))
-        ttk.Button(bar, text="自检", command=self.check_env).pack(side="left", padx=(8, 0))
-        ttk.Button(bar, text="打开输出目录", command=self.open_output).pack(side="left", padx=(8, 0))
-        ttk.Button(bar, text="清空日志", command=self.clear_log).pack(side="left", padx=(8, 0))
-
-        self.progress = ttk.Progressbar(bar, mode="determinate", length=170)
-        self.progress.pack(side="right")
-        ttk.Label(bar, textvariable=self.var_status, foreground=COLOR_MUTED).pack(
-            side="right", padx=(0, 10)
-        )
-        return bar
-
-    def _build_body(self, parent: ttk.Frame) -> ttk.Widget:
-        paned = ttk.Panedwindow(parent, orient=tk.VERTICAL)
-
-        preview_box = ttk.LabelFrame(paned, text=" 拟合预览 ", padding=(8, 6))
-        cols = ("name", "chars", "size", "spacing", "text_w", "base_len", "status")
-        headings = {
-            "name": ("名字", 150),
-            "chars": ("字符", 50),
-            "size": ("字号", 65),
-            "spacing": ("间距", 65),
-            "text_w": ("文字宽", 75),
-            "base_len": ("底座长", 75),
-            "status": ("状态", 330),
-        }
-        self.tree = ttk.Treeview(preview_box, columns=cols, show="headings", height=7)
-        for key in cols:
-            text, width = headings[key]
-            self.tree.heading(key, text=text)
-            self.tree.column(key, width=width, anchor="w" if key in {"name", "status"} else "center")
-        self.tree.tag_configure("warn", foreground=COLOR_WARN)
-        self.tree.tag_configure("err", foreground=COLOR_ERR)
-        self.tree.tag_configure("ok", foreground=COLOR_OK)
-        scroll = ttk.Scrollbar(preview_box, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.pack(side="left", fill=tk.BOTH, expand=True)
-        scroll.pack(side="right", fill="y")
-        paned.add(preview_box, weight=3)
-
-        log_box = ttk.LabelFrame(paned, text=" 运行日志 ", padding=(8, 6))
-        self.txt_log = tk.Text(log_box, height=12, wrap="word", state="disabled")
-        log_scroll = ttk.Scrollbar(log_box, orient="vertical", command=self.txt_log.yview)
-        self.txt_log.configure(yscrollcommand=log_scroll.set)
-        self.txt_log.pack(side="left", fill=tk.BOTH, expand=True)
-        log_scroll.pack(side="right", fill="y")
-        paned.add(log_box, weight=2)
-        return paned
-
     # ---------------- 字体 ----------------
+
+    def _current_face(self) -> FontFace | None:
+        return self.library.find(self.var_family.get(), self.var_style.get() or "Regular")
 
     def _refresh_fonts(self) -> None:
         families = self.library.families()
@@ -367,11 +477,57 @@ class StampApp:
         self.var_style.set(current if current in styles else (styles[0] if styles else ""))
         self._schedule_preview()
 
+    def _refresh_font_preview(self) -> None:
+        """用 Pillow 直接渲染内置 ttf，字体/字号/加粗/大小写一变就重画。"""
+        face = self._current_face()
+        if face is None:
+            self.lbl_preview.configure(image="", text="（没有可用字体）")
+            self._preview_photo = None
+            return
+        try:
+            size_mm = float(self.var_size.get())
+            weight = float(self.var_weight.get())
+        except ValueError:
+            size_mm, weight = 6.0, 0.0
+        names = self._read_names()
+        text = fontpreview.sample_text(self._case_mode(), names[0] if names else "")
+        width = max(self.preview_holder.winfo_width() - 16, 480)
+        rendered = fontpreview.render_preview(
+            face.path,
+            text,
+            size_mm,
+            weight,
+            max_px=width,
+            bg=COLOR_PREVIEW_BG,
+        )
+        if rendered is None:
+            self.lbl_preview.configure(
+                image="", text=f"{face.label}：预览不可用（缺少 Pillow 或字体损坏）"
+            )
+            self._preview_photo = None
+            return
+        image, _scale = rendered
+        try:
+            from PIL import ImageTk
+
+            self._preview_photo = ImageTk.PhotoImage(image)
+        except Exception:
+            self._preview_photo = None
+            self.lbl_preview.configure(image="", text=f"{face.label}（预览不可用）")
+            return
+        self.lbl_preview.configure(image=self._preview_photo, text="")
+
     # ---------------- 配置 ----------------
 
     def _load_cfg_into_ui(self) -> None:
-        self.var_names.set(self.cfg.names_txt)
         self.var_outroot.set(self.cfg.output_root_dir)
+        if self.cfg.names_txt and Path(self.cfg.names_txt).is_file():
+            self._load_names_file(Path(self.cfg.names_txt), quiet=True)
+        self._refresh_output_label()
+        self.preview()
+
+    def _case_mode(self) -> str:
+        return self._case_label_to_key.get(self.var_case.get(), "keep")
 
     def _collect_cfg(self) -> AppConfig:
         cfg = self.cfg
@@ -382,50 +538,35 @@ class StampApp:
             try:
                 value = float(raw)
             except ValueError:
-                raise ValueError(f"{label} 不是有效数字：{raw!r}")
+                raise ValueError(f"{label} 不是有效数字：{raw!r}") from None
             if value < minimum:
-                raise ValueError(f"{label} 不能小于 {minimum}")
+                raise ValueError(f"{label} 不能小于 {minimum:g}")
             return value
 
-        spec.margin_mm = num(self.var_margin, "留白")
-        spec.weight_offset_mm = num(self.var_weight, "几何加粗")
         spec.base_width_mm = num(self.var_base_w, "底座宽度", 0.5)
         spec.base_height_mm = num(self.var_base_h, "底座高度", 0.5)
-        spec.letter_height_mm = num(self.var_letter_h, "文字高度", 0.2)
-
-        spec.width_mode = self.var_mode.get() or "fixed"
-        if spec.is_auto_width():
-            spec.auto_size_mm = num(self.var_auto_size, "固定字号", 0.5)
-            spec.auto_spacing = num(self.var_auto_spacing, "字间距", 0.1)
-            # 目标宽度在 auto 模式下不参与计算，填成什么都别拦住预览
-            try:
-                spec.target_width_mm = num(self.var_width, "目标宽度", 1.0)
-            except ValueError:
-                pass
-        else:
-            spec.min_size_mm = num(self.var_min_size, "最小字号", 0.5)
-            spec.max_size_mm = num(self.var_max_size, "最大字号", 0.5)
-            if spec.min_size_mm > spec.max_size_mm:
-                raise ValueError("最小字号不能大于最大字号")
-            if 2 * spec.margin_mm >= spec.target_width_mm:
-                raise ValueError("左右留白之和必须小于目标宽度")
-
-        if spec.weight_offset_mm > 0.3:
-            raise ValueError("几何加粗建议不超过 0.3mm，否则 A/O/e 的内孔会被填死")
+        spec.max_width_mm = num(self.var_max_w, "最长上限", 1.0)
+        spec.margin_mm = num(self.var_margin, "左右留白")
+        spec.letter_height_mm = num(self.var_letter_h, "字体高度", 0.2)
+        spec.font_size_mm = num(self.var_size, "字号", 0.5)
+        spec.letter_spacing = num(self.var_spacing, "字间距", 0.1)
+        spec.weight_offset_mm = num(self.var_weight, "几何加粗")
+        spec.case_mode = self._case_mode()
 
         raw_workers = (self.var_workers.get() or "").strip()
         if raw_workers:
             try:
                 cfg.workers = max(0, int(float(raw_workers)))
             except ValueError:
-                raise ValueError(f"同时生成数不是有效整数：{raw_workers!r}")
+                raise ValueError(f"同时生成数不是有效整数：{raw_workers!r}") from None
         else:
             cfg.workers = 0
 
         cfg.font_family = self.var_family.get()
         cfg.font_style = self.var_style.get() or "Regular"
-        cfg.names_txt = self.var_names.get().strip()
+        cfg.names_txt = self._names_source_txt
         cfg.output_root_dir = self.var_outroot.get().strip()
+        cfg.open_output_after_run = bool(self.var_open_after.get())
         # 与默认值相同就存空串：这样换机器、移动 exe 之后会自动重新探测，
         # 也不会把 PyInstaller 的临时解包路径写进配置。
         raw_exe = self.var_openscad.get().strip()
@@ -451,18 +592,25 @@ class StampApp:
         """参数改动后延迟存盘。
 
         不等到关窗才保存：用户改完参数直接关任务管理器、或程序被强杀时，
-        下次打开还能沿用上次的目标宽度等设置。
+        下次打开还能沿用上次的字体、字号、大小写等设置。
         """
-        job = getattr(self, "_persist_job", None)
-        if job:
-            self.root.after_cancel(job)
+        if self._persist_job:
+            self.root.after_cancel(self._persist_job)
         self._persist_job = self.root.after(1500, self._persist_now)
 
     def _persist_now(self) -> None:
         self._persist_job = None
         self._persist()
 
-    # ---------------- 日志 ----------------
+    def _refresh_output_label(self) -> None:
+        root = self.var_outroot.get().strip()
+        if not root:
+            self.var_out_hint.set("实际输出：请先选择输出目录")
+            return
+        target = batch_mod.derive_output_dir(self._names_source_txt or "names", root)
+        self.var_out_hint.set(f"实际输出：{target}")
+
+    # ---------------- 日志与状态 ----------------
 
     def log(self, message: str) -> None:
         self.log_queue.put(("log", message))
@@ -473,10 +621,12 @@ class StampApp:
         self.txt_log.see("end")
         self.txt_log.configure(state="disabled")
 
-    def clear_log(self) -> None:
-        self.txt_log.configure(state="normal")
-        self.txt_log.delete("1.0", "end")
-        self.txt_log.configure(state="disabled")
+    def _set_status(self, text: str) -> None:
+        """状态栏字数有限，超出就截断 —— 完整信息在日志里。"""
+        text = (text or "").replace("\n", " ")
+        if len(text) > STATUS_MAX_CHARS:
+            text = text[: STATUS_MAX_CHARS - 1] + "…"
+        self.var_status.set(text)
 
     def _poll_queue(self) -> None:
         try:
@@ -488,14 +638,79 @@ class StampApp:
                     done, total = payload
                     self.progress["maximum"] = max(total, 1)
                     self.progress["value"] = done
-                    self.var_status.set(f"{done}/{total}")
+                    self._set_status(f"生成中 {done}/{total}")
                 elif kind == "status":
-                    self.var_status.set(payload)
+                    self._set_status(payload)
                 elif kind == "done":
                     self._on_worker_done(payload)
         except queue.Empty:
             pass
         self.root.after(100, self._poll_queue)
+
+    # ---------------- 名字清单 ----------------
+
+    def _on_names_scroll(self, first: str, last: str) -> None:
+        self.names_scroll.set(first, last)
+        self._redraw_line_numbers()
+
+    def _redraw_line_numbers(self) -> None:
+        """只画可见区间的行号，上千行也不会卡。"""
+        txt = self.txt_names
+        try:
+            last = int(txt.index("end-1c").split(".")[0])
+            top = int(txt.index("@0,0").split(".")[0])
+            height = max(txt.winfo_height() - 2, 1)
+            bottom = int(txt.index(f"@0,{height}").split(".")[0])
+        except Exception:
+            return
+        # 末尾空行不编号：粘贴内容常以换行结尾，那行并没有名字
+        total = last
+        if last > 1 and not txt.get(f"{last}.0", f"{last}.end"):
+            total = last - 1
+        start = max(1, top - 1)
+        end = min(total, max(bottom, top) + 1)
+        if end < start:
+            end = start
+        numbers = "\n".join(str(n) for n in range(start, end + 1))
+        # 前后补空行，让行号框与主框总行数一致，yview 才能严格对齐
+        body = "\n" * (start - 1) + numbers + "\n" * max(0, total - end)
+        self.txt_lineno.configure(state="normal")
+        self.txt_lineno.delete("1.0", "end")
+        self.txt_lineno.insert("1.0", body)
+        self.txt_lineno.configure(state="disabled")
+        self.txt_lineno.yview_moveto(0 if total <= 1 else (start - 1) / total)
+
+    def _on_names_changed(self) -> None:
+        self._redraw_line_numbers()
+        self._schedule_preview()
+
+    def _read_names(self) -> list[str]:
+        raw = self.txt_names.get("1.0", "end").splitlines()
+        names = validate.normalize_names(raw)
+        return validate.apply_case(names, self._case_mode())
+
+    def _refresh_names_stat(self) -> None:
+        names = self._read_names()
+        unique, duplicates = validate.dedupe(names)
+        text = f"共 {len(names)} 个"
+        if duplicates:
+            text += f"（重名 {len(duplicates)}，去重后 {len(unique)}）"
+        self.var_names_stat.set(text)
+
+    def _load_names_file(self, path: Path, quiet: bool = False) -> None:
+        try:
+            content = _read_text_file(path)
+        except OSError as exc:
+            if not quiet:
+                messagebox.showerror(APP_TITLE, f"读取失败：{exc}")
+            return
+        self._names_source_txt = str(path)
+        self.txt_names.delete("1.0", "end")
+        self.txt_names.insert("1.0", content.strip())
+        self._redraw_line_numbers()
+        self._refresh_output_label()
+        if not quiet:
+            self.preview()
 
     # ---------------- 交互 ----------------
 
@@ -503,16 +718,19 @@ class StampApp:
         path = filedialog.askopenfilename(
             title="选择名字清单",
             filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
-            initialdir=str(paths.app_root()),
+            initialdir=str(Path(self._names_source_txt).parent)
+            if self._names_source_txt
+            else str(paths.app_root()),
         )
         if path:
-            self.var_names.set(path)
-            self.preview()
+            self._load_names_file(Path(path))
 
     def _pick_outroot(self) -> None:
-        path = filedialog.askdirectory(title="选择输出根目录")
+        path = filedialog.askdirectory(title="选择输出目录")
         if path:
             self.var_outroot.set(path)
+            self._refresh_output_label()
+            self._schedule_preview()
 
     def _pick_openscad(self) -> None:
         path = filedialog.askopenfilename(
@@ -522,6 +740,7 @@ class StampApp:
         )
         if path:
             self.var_openscad.set(path)
+            self._schedule_persist()
 
     def _pick_template(self) -> None:
         current = self.var_template.get().strip()
@@ -536,7 +755,7 @@ class StampApp:
         )
         if path:
             self.var_template.set(path)
-            self._schedule_preview()
+            self._schedule_persist()
 
     def _on_drop(self, event) -> None:  # pragma: no cover - 依赖 GUI
         raw = str(event.data).strip()
@@ -545,149 +764,197 @@ class StampApp:
         for part in raw.split():
             candidate = part.strip("{}")
             if candidate.lower().endswith(".txt") and Path(candidate).is_file():
-                self.var_names.set(candidate)
-                self.preview()
+                self._load_names_file(Path(candidate))
                 return
 
-    def open_output(self) -> None:
-        try:
-            cfg = self._collect_cfg()
-        except ValueError:
-            return
-        names = Path(cfg.names_txt)
-        if not cfg.output_root_dir:
-            messagebox.showinfo(APP_TITLE, "请先选择输出目录")
-            return
-        target = batch_mod.derive_output_dir(names, cfg.output_root_dir)
-        if not target.is_dir():
-            target = Path(cfg.output_root_dir)
-        if target.is_dir():
-            webbrowser.open(target.as_uri())
-        else:
-            messagebox.showinfo(APP_TITLE, f"目录还不存在：{target}")
+    # ---------------- 提示带 ----------------
 
-    def _read_names(self) -> list[str]:
-        raw = self.var_names.get().strip()
-        if not raw:
-            raise ValueError("请先选择名字清单")
-        path = Path(raw)
-        if not path.is_file():
-            raise ValueError(f"找不到名字清单：{path}")
-        return validate.normalize_names(path.read_text(encoding="utf-8").splitlines())
+    def _render_hints(self, issues: list[validate.SpecIssue]) -> None:
+        for child in self.hint_frame.winfo_children():
+            child.destroy()
+        for issue in issues[:3]:
+            row = ttk.Frame(self.hint_frame)
+            row.pack(fill="x", pady=1)
+            color = COLOR_ERR if issue.is_error else COLOR_WARN
+            tk.Label(
+                row, text="✕" if issue.is_error else "!", fg=color, font=("", 10, "bold")
+            ).pack(side="left")
+            tk.Label(
+                row,
+                text=issue.message,
+                fg=color,
+                anchor="w",
+                justify="left",
+                wraplength=820,
+            ).pack(side="left", padx=(6, 0))
+            if issue.fixable:
+                ttk.Button(
+                    row,
+                    text="采用",
+                    width=6,
+                    command=lambda fix=issue.fix: self._apply_fix(fix),
+                ).pack(side="left", padx=(10, 0))
+
+    def _apply_fix(self, fix: dict) -> None:
+        for key, value in fix.items():
+            var = self._spec_vars.get(key)
+            if var is None:
+                continue
+            var.set(f"{value:g}" if isinstance(value, float) else str(value))
+        self._schedule_preview()
+
+    # ---------------- 悬停提示 ----------------
+
+    def _on_tree_motion(self, event) -> None:
+        iid = self.tree.identify_row(event.y)
+        if iid == self._hover_iid:
+            return
+        self._hover_iid = iid
+        self._hide_tip()
+        detail = self._row_detail.get(iid, "")
+        if detail:
+            self._show_tip(event.x_root + 16, event.y_root + 12, detail)
+
+    def _show_tip(self, x: int, y: int, text: str) -> None:
+        tip = tk.Toplevel(self.root)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            tip,
+            text=text,
+            justify="left",
+            background="#fdf6e3",
+            relief="solid",
+            borderwidth=1,
+            wraplength=420,
+            padx=8,
+            pady=4,
+        ).pack()
+        self._tip = tip
+
+    def _hide_tip(self) -> None:
+        if self._tip is not None:
+            self._tip.destroy()
+            self._tip = None
+
+    # ---------------- 预览 ----------------
 
     def _schedule_preview(self) -> None:
-        if getattr(self, "_preview_job", None):
+        if self._preview_job:
             self.root.after_cancel(self._preview_job)
         self._preview_job = self.root.after(250, self.preview)
         self._schedule_persist()
 
-    # ---------------- 预览 ----------------
-
     def preview(self) -> None:
         self._preview_job = None
         self.tree.delete(*self.tree.get_children())
+        self._row_detail.clear()
+        self._hover_iid = ""
+        self._hide_tip()
+        self._refresh_font_preview()
+        self._refresh_names_stat()
+        self._refresh_output_label()
+
         try:
             cfg = self._collect_cfg()
-            names = self._read_names()
         except ValueError as exc:
-            self.var_status.set(str(exc))
-            return
-        if not names:
-            self.var_status.set("名字清单为空")
+            self._render_hints([])
+            self._set_status(str(exc))
             return
 
-        face = self.library.find(cfg.font_family, cfg.font_style)
+        face = self._current_face()
         if face is None:
-            self.var_status.set("内置字体库为空")
+            self._render_hints([])
+            self._set_status("内置字体库为空")
             return
         fm = self.library.metrics(face)
         spec = cfg.spec
-        unique, duplicates = validate.dedupe(names)
-        issues = validate.validate_batch(unique, fm, spec)
 
-        filled = 0
-        auto = spec.is_auto_width()
+        spec_issues = validate.check_spec(fm, spec)
+        self._render_hints(spec_issues)
+
+        names = self._read_names()
+        if not names:
+            self._set_status("名字清单为空 —— 选择 txt 或直接粘贴")
+            return
+        unique, duplicates = validate.dedupe(names)
+        name_issues = validate.validate_batch(unique, fm, spec)
+
+        ok_count = 0
         lengths: list[float] = []
-        for name in unique:
-            blocking = validate.blocking_issues(issues.get(name, []))
-            fit = (
-                metrics.fit_auto(fm, name, spec)
-                if auto
-                else metrics.fit(fm, name, spec)
-            )
+        for index, name in enumerate(unique, start=1):
+            blocking = validate.blocking_issues(name_issues.get(name, []))
             if blocking:
-                note = validate.format_issues(blocking)
+                values = (index, name, len(name), "", "", "", "跳过", "")
                 tag = "err"
-                size = spacing = text_w = base_len = ""
+                detail = validate.format_issues(blocking)
             else:
-                if auto:
-                    note = "；".join(fit.notes) or "正常"
+                fit = metrics.fit(fm, name, spec)
+                if fit.is_blocking:
+                    tag = "err"
+                elif fit.needs_attention:
+                    tag = "warn"
                 else:
-                    note = f"填充 {fit.fill_ratio * 100:.0f}%"
-                    if fit.notes:
-                        note += "；" + "；".join(fit.notes)
-                tag = "ok" if fit.status == "ok" else "warn"
-                size = f"{fit.size_mm:.2f}"
-                spacing = f"{fit.spacing:.2f}"
-                text_w = f"{fit.width_mm:.2f}"
-                base_len = f"{fit.base_len_mm:.2f}"
-                lengths.append(fit.base_len_mm)
-                filled += 1
-            self.tree.insert(
-                "",
-                "end",
-                values=(name, len(name), size, spacing, text_w, base_len, note),
-                tags=(tag,),
-            )
+                    tag = "ok"
+                values = (
+                    index,
+                    name,
+                    len(name),
+                    f"{fit.size_mm:.2f}",
+                    f"{fit.spacing:.2f}",
+                    f"{fit.base_len_mm:.2f}",
+                    fit.label,
+                    "",
+                )
+                # 正常的不弹提示，否则鼠标一扫满屏都是气泡
+                detail = fit.detail if (fit.needs_attention or fit.is_blocking) else ""
+                if fit.ok:
+                    ok_count += 1
+                    lengths.append(fit.base_len_mm)
+            iid = self.tree.insert("", "end", values=values, tags=(tag,))
+            self._row_detail[iid] = detail
+
         for name in duplicates:
-            self.tree.insert(
+            iid = self.tree.insert(
                 "",
                 "end",
-                values=(name, len(name), "", "", "", "", "与本批次前面重名，只生成一次"),
+                values=("—", name, len(name), "", "", "", "重名", ""),
                 tags=("err",),
             )
-        span = ""
-        if auto and lengths:
-            span = f"　|　底座 {min(lengths):.1f}~{max(lengths):.1f}mm"
-        self.var_status.set(f"可生成 {filled}/{len(unique)}{span}　|　{face.label}")
+            self._row_detail[iid] = "与本批次前面重名，只生成一次"
 
-    # ---------------- 自检 ----------------
-
-    def check_env(self) -> None:
-        try:
-            cfg = self._collect_cfg()
-        except ValueError as exc:
-            messagebox.showerror(APP_TITLE, str(exc))
-            return
-        self.log("—— 自检 ——")
-        try:
-            self.log(f"OpenSCAD：{openscad.version(cfg.resolved_openscad())}")
-        except Exception as exc:
-            self.log(f"OpenSCAD 检测失败：{exc}")
-            return
-        self.log(f"模板：{cfg.resolved_template()}")
-        face = self.library.find(cfg.font_family, cfg.font_style)
-        if face is None:
-            self.log("内置字体库为空")
-            return
-        ok = openscad.can_resolve_font(cfg.resolved_openscad(), face, self.library.env())
-        self.log(f"字体解析：{face.label} → {'成功' if ok else '失败（会回退到默认字体）'}")
-        self.log(f"fontconfig：{self.library.write_fontconfig()}")
+        span = f"，底座 {min(lengths):.1f}~{max(lengths):.1f}mm" if lengths else ""
+        self._set_status(f"可生成 {ok_count}/{len(unique)}{span}　|　{face.label}")
 
     # ---------------- 生成 ----------------
+
+    def _resolve_output_dir(self, cfg: AppConfig) -> Path:
+        return batch_mod.derive_output_dir(
+            self._names_source_txt or "names", cfg.output_root_dir
+        )
 
     def start(self) -> None:
         if self.worker and self.worker.is_alive():
             return
         try:
             cfg = self._collect_cfg()
-            names = self._read_names()
         except ValueError as exc:
             messagebox.showerror(APP_TITLE, str(exc))
             return
+        names = self._read_names()
         if not names:
-            messagebox.showinfo(APP_TITLE, "名字清单为空")
+            messagebox.showinfo(APP_TITLE, "名字清单为空，请选择 txt 或直接粘贴")
             return
+        face = self._current_face()
+        if face is not None:
+            spec_issues = validate.check_spec(self.library.metrics(face), cfg.spec)
+            errors = [i for i in spec_issues if i.is_error]
+            if errors:
+                messagebox.showerror(
+                    APP_TITLE,
+                    "参数有问题，无法生成：\n\n" + "\n".join(f"· {i.message}" for i in errors),
+                )
+                return
         if not cfg.output_root_dir:
             messagebox.showinfo(APP_TITLE, "请先选择输出目录")
             return
@@ -699,7 +966,7 @@ class StampApp:
                 APP_TITLE,
                 "找不到 OpenSCAD：\n"
                 f"{cfg.resolved_openscad()}\n\n"
-                "请在上方「OpenSCAD」一栏指定 openscad.exe，\n"
+                "请在「OpenSCAD」一栏指定 openscad.exe，\n"
                 "或把 OpenSCAD 文件夹放在本程序旁边。",
             )
             return
@@ -709,10 +976,10 @@ class StampApp:
         self.btn_start.configure(state="disabled")
         self.btn_cancel.configure(state="normal")
         self.progress["value"] = 0
+        output_dir = self._resolve_output_dir(cfg)
         self.log("")
-        self.log(f"开始生成，共 {len(names)} 个名字")
+        self.log(f"开始生成，共 {len(names)} 个名字 → {output_dir}")
 
-        output_dir = batch_mod.derive_output_dir(Path(cfg.names_txt), cfg.output_root_dir)
         self.worker = threading.Thread(
             target=self._run_batch, args=(cfg, names, output_dir), daemon=True
         )
@@ -742,19 +1009,29 @@ class StampApp:
         self.btn_start.configure(state="normal")
         self.btn_cancel.configure(state="disabled")
         if report is None:
-            self.var_status.set("已中止")
+            self._set_status("已中止")
             return
         for line in report.lines():
             self.log(line)
         self.log("")
         self.log(report.summary())
         bases = [r.base_len for r in report.results if r.base_len]
-        span = ""
-        if self.cfg.spec.is_auto_width() and bases:
-            span = f"，底座 {min(bases):.1f}~{max(bases):.1f}mm"
-        self.var_status.set(
-            f"完成：成功 {report.generated}，跳过 {report.skipped}，失败 {report.failed}{span}"
+        span = f"，底座 {min(bases):.1f}~{max(bases):.1f}mm" if bases else ""
+        self._set_status(
+            f"完成：成功 {report.generated}，跳过 {report.skipped}，"
+            f"失败 {report.failed}{span}"
         )
+        if report.generated and self.var_open_after.get():
+            self._open_folder(report.output_dir)
+
+    def _open_folder(self, path: Path) -> None:
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            else:
+                webbrowser.open(Path(path).as_uri())
+        except OSError as exc:
+            self.log(f"打开输出文件夹失败：{exc}")
 
     def cancel_run(self) -> None:
         self.cancel.set()

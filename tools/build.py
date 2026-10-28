@@ -42,7 +42,7 @@ ICON = ROOT / "assets" / "stampgen.ico"
 
 APP_NAME = "StampGen"
 CLI_NAME = "stampgen-cli"
-VERSION = (2, 1, 0, 0)
+VERSION = (2, 2, 0, 0)
 VERSION_STR = ".".join(str(x) for x in VERSION[:3])
 
 # 需要随程序分发的只读资源：源目录 -> exe 内目录名
@@ -82,28 +82,34 @@ QUICKSTART = """\
 名字印章生成器 {version}
 ========================================
 
-【两种宽度模式】
+【只有一种宽度逻辑：限宽】
 
-  固定字号 → 自适应宽度（默认）
-      你给字号（如 6mm）和字间距，程序算出每个名字各自的底座长度。
-      字一样大，长名字的印章更长。这就是旧版的做法，区别是不再按
-      「字符数 x 6」查表估长度，而是按字体真实字宽精算，误差 0.02mm。
+  字号由你给定（如 6mm），底座长度按名字的真实字宽算出来，
+  但不会超过你设的「最长不超过」（如 60mm）。
 
-  固定宽度 → 自适应字号
-      你给目标宽度（如 30mm），程序算出每个名字的字号与间距。
-      印章一样宽，短名字的字更小。
-
-  界面上方「宽度模式」两个单选随时切换，选过就记住。
+  · 3 个字母的印章就出 3 个字母那么长，不会硬撑到 60mm
+  · 名字太长时，先把字间距从 1.00 压到 0.85（省约 15% 宽度）
+  · 还不够就按比例缩字号，缩到 2.5mm 仍放不下才判「超长」并跳过
+  · 每次压缩都会在结果表的「状态」列标出来，鼠标悬停看完整原因
 
 【怎么用】
 
 1. 双击 StampGen.exe 打开界面。
-2. 选宽度模式，选字体、调字重，填字号（或目标宽度）。
-3. 选名字清单 txt（一行一个名字），或直接拖进来。
-4. 点「开始生成」，STL 会输出到清单同目录的 output_stl<日期> 里。
+2. 填「印章几何」：底座宽度、高度、最长不超过、左右留白、字体高度。
+3. 填「字体」：字体、字号、字间距、几何加粗、大小写。
+   预览条会实时显示字形；改字号、加粗、大小写都会跟着变。
+4. 选名字清单：点「选择 txt 文件」，或直接把名字粘贴进右下框
+   （左边有行号，一行一个名字）。大小写在读入后立即生效。
+5. 点「开始生成」，STL 输出到 <输出目录>\output_stl<日期>\，
+   完成后会自动打开该文件夹（可在配置区取消勾选）。
 
-  预览表会列出每个名字的字号、间距、文字宽、底座长，
-  确认没问题再点开始；有问题的名字会标红或标黄并说明原因。
+  结果表会列出每个名字的字号、间距、底座长与状态，
+  参数一改就自动刷新，不用点任何「预览」按钮。
+
+【参数之间有约束】
+
+  字号 6mm 的字体，字高约 5.9mm，所以底座宽度不能小于 6mm；
+  超了程序会自动压字号，并在参数区下方给一条提示 + 「采用」按钮。
 
 【同时生成】
 
@@ -112,29 +118,29 @@ QUICKSTART = """\
 
 【参数会被记住】
 
-宽度模式、字号、目标宽度、留白、底座尺寸、字体等，改完停手 1.5 秒
+字体、字号、间距、加粗、大小写、留白、底座尺寸等，改完停手 1.5 秒
 就自动存进 stampgen_config.json（本文件旁边），下次打开自动沿用。
 想恢复出厂设置：删掉 stampgen_config.json 即可。
 
 【需要 OpenSCAD】
 
 本程序调用 OpenSCAD 完成建模，需要本机有 openscad.exe：
-  · 推荐：把 OpenSCAD 整个文件夹放在本 exe 旁边（本包里已附带 OpenSCAD\\）
+  · 推荐：把 OpenSCAD 整个文件夹放在本 exe 旁边（本包里已附带 OpenSCAD\）
   · 或者：在界面里手动指定 openscad.exe 路径
 
 【想用自己的字体】
 
 在本 exe 旁边新建 fonts 文件夹，把 .ttf 丢进去即可——
-程序会优先使用外部 fonts\\，没有才用 exe 内置的字体。
+程序会优先使用外部 fonts\，没有才用 exe 内置的字体。
 
 【命令行用法】
 
-  stampgen-cli.exe fonts                              列出可用字体
-  stampgen-cli.exe check                              自检 OpenSCAD 与字体解析
-  stampgen-cli.exe fit --names names.txt              只算尺寸，不建模
-  stampgen-cli.exe batch --names names.txt --mode auto --size 6
-  stampgen-cli.exe batch --names names.txt --mode fixed --width 30
-  stampgen-cli.exe fit --mode auto --size 6 --save    把这组参数存为默认
+  stampgen-cli.exe fonts                                   列出可用字体
+  stampgen-cli.exe check                                   自检 OpenSCAD 与字体解析
+  stampgen-cli.exe fit --names names.txt                   只算尺寸，不建模
+  stampgen-cli.exe batch --names names.txt --size 6 --max-width 60
+  stampgen-cli.exe batch --names names.txt --case upper --weight 0.1
+  stampgen-cli.exe fit --size 6 --max-width 60 --save      把这组参数存为默认
 """
 
 

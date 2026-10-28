@@ -43,9 +43,9 @@ class RenderParams:
         if metrics is not None:
             offset_y = metrics_mod.text_offset_y(metrics, name, fit.size_mm)
         fa, fs = curve if curve is not None else (4.0, 0.3)
-        # auto 模式下底座长度逐名不同，由 fit.base_len_mm 给出；
-        # fixed 模式下它等于 target_width_mm，两种模式共用同一条路径。
-        length = fit.base_len_mm or spec.target_width_mm
+        # 底座长度逐名不同，由 fit.base_len_mm 给出（= 文字宽 + 两侧留白）。
+        # 空名字不会走到渲染，这里只做一次兜底。
+        length = fit.base_len_mm if fit.base_len_mm > 0 else spec.base_len_for(0.0)
         return cls(
             name=name,
             base_len=round(length if base_len is None else base_len, 3),

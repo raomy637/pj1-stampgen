@@ -31,9 +31,12 @@ def test_to_defines_quotes_strings(face, metrics_of, spec):
 
 
 def test_to_defines_formats_floats(face, metrics_of, spec):
-    params = template.RenderParams.build("BELLA", face, spec, fit(metrics_of, "BELLA", spec), metrics_of)
+    fit_result = fit(metrics_of, "BELLA", spec)
+    params = template.RenderParams.build("BELLA", face, spec, fit_result, metrics_of)
     defines = template.to_defines(params)
-    assert f"base_len={spec.target_width_mm:g}" in defines
+    # 底座长度逐名不同，由 fit 给出，不再等于某个固定的目标宽度
+    raw = next(d for d in defines if d.startswith("base_len="))
+    assert float(raw.split("=", 1)[1]) == pytest.approx(fit_result.base_len_mm, abs=1e-3)
 
 
 def test_render_params_offsets_baseline(face, metrics_of, spec):

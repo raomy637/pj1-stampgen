@@ -1,4 +1,4 @@
-"""字宽模型与自适应拟合的单元测试。
+"""字宽模型与限宽求解的单元测试。
 
 基准数据来自在 OpenSCAD 2021.01 上的实测（Daziji_V5，size=10，spacing=1.0）。
 """
@@ -17,6 +17,20 @@ MEASURED = {
     "BELLA": 41.67,
     "GRACIE": 50.56,
 }
+
+SIZE = 6.0
+
+
+@pytest.fixture()
+def roomy(metrics_of) -> StampSpec:
+    """底座宽度够装下 6mm 字号的参数，排除「限字高」干扰。"""
+    spec = StampSpec()
+    spec.font_size_mm = SIZE
+    spec.base_width_mm = metrics.cap_height_mm(metrics_of, SIZE) + 0.1
+    return spec
+
+
+# ---------------- 字宽模型 ----------------
 
 
 def test_ink_linear_single_char_has_no_advance_term(metrics_of):
@@ -37,38 +51,148 @@ def test_predict_width_matches_measured(metrics_of, name, expected):
     assert predicted == pytest.approx(expected, rel=0.01)
 
 
-def test_size_limit_respects_base_width(metrics_of, spec):
-    limit = metrics.size_limit_from_geometry(metrics_of, spec)
-    cap = metrics.cap_height_mm(metrics_of, limit)
-    assert cap == pytest.approx(spec.base_width_mm - 2 * spec.edge_mm, rel=0.02)
+def test_weight_offset_widens(metrics_of):
+    plain = metrics.predict_width(metrics_of, "BELLA", 5.0, 1.0, 0.0)
+    bold = metrics.predict_width(metrics_of, "BELLA", 5.0, 1.0, 0.2)
+    assert bold - plain == pytest.approx(0.4, abs=1e-6)
 
 
-def test_size_bounds_never_inverted(metrics_of):
-    spec = StampSpec(min_size_mm=8.0, max_size_mm=2.0)
-    lo, hi = metrics.size_bounds(metrics_of, spec)
-    assert lo <= hi
+def test_size_from_probe_is_linear():
+    assert metrics.size_from_probe(20.0, 10.0, 30.0) == pytest.approx(15.0)
+    assert metrics.size_from_probe(0.0, 10.0, 30.0) == 0.0
 
 
-def test_fit_fills_available_width(metrics_of, spec):
+def test_probe_scale_recovers_systematic_bias(metrics_of):
+    exact = metrics.predict_width(metrics_of, "BELLA", 10.0, 1.0, 0.0)
+    scale = metrics.probe_scale(metrics_of, "BELLA", 1.0, exact * 1.02, 10.0)
+    assert scale == pytest.approx(1.02, rel=1e-6)
+
+
+# ---------------- 几何约束 ----------------
+
+
+def test_size_cap_fills_base_width_exactly(metrics_of, spec):
+    cap_limit = metrics.size_cap_from_base(metrics_of, spec)
+    assert metrics.cap_height_mm(metrics_of, cap_limit) == pytest.approx(
+        spec.base_width_mm, rel=1e-6
+    )
+
+
+def test_size_cap_subtracts_bold_expansion(metrics_of):
+    """加粗会让字高多出 2 × weight，上限必须跟着降（v2.1.0 这里漏算过）。"""
+    plain = metrics.size_cap_from_base(metrics_of, StampSpec(weight_offset_mm=0.0))
+    bold = metrics.size_cap_from_base(metrics_of, StampSpec(weight_offset_mm=0.2))
+    assert bold < plain
+    assert metrics.cap_height_mm(metrics_of, bold) + 0.4 == pytest.approx(6.0, rel=1e-6)
+
+
+def test_base_len_inverts_max_text_width(spec):
+    assert spec.base_len_for(spec.max_text_width()) == pytest.approx(spec.max_width_mm)
+
+
+# ---------------- 限宽求解 ----------------
+
+
+def test_fit_keeps_requested_size_when_it_fits(metrics_of, roomy):
+    fit = metrics.fit(metrics_of, "BELLA", roomy)
+    assert fit.status == "ok"
+    assert fit.size_mm == pytest.approx(SIZE)
+    assert fit.spacing == pytest.approx(roomy.letter_spacing)
+
+
+def test_fit_short_name_is_not_padded(metrics_of, roomy):
+    """3 个字母的印章就该比 8 个字母的短，不能硬撑到上限。"""
+    short = metrics.fit(metrics_of, "AVA", roomy)
+    long = metrics.fit(metrics_of, "GRACIE", roomy)
+    assert short.status == "ok" and long.status == "ok"
+    assert short.base_len_mm < long.base_len_mm < roomy.max_width_mm
+    assert short.fill_ratio < 0.5
+
+
+def test_fit_exactly_at_limit_stays_ok(metrics_of, roomy):
+    width = metrics.predict_width(metrics_of, "BELLA", SIZE, roomy.letter_spacing, 0.0)
+    roomy.max_width_mm = roomy.base_len_for(width)
+    fit = metrics.fit(metrics_of, "BELLA", roomy)
+    assert fit.status == "ok"
+    assert fit.base_len_mm == pytest.approx(roomy.max_width_mm, abs=1e-3)
+
+
+def test_fit_compresses_spacing_first(metrics_of, roomy):
+    """略微超宽只压间距，字号必须保持不变。"""
+    width = metrics.predict_width(metrics_of, "BELLA", SIZE, 0.92, 0.0)
+    roomy.max_width_mm = roomy.base_len_for(width)
+
+    fit = metrics.fit(metrics_of, "BELLA", roomy)
+    assert fit.status == "spacing_compressed"
+    assert fit.size_mm == pytest.approx(SIZE)
+    assert fit.spacing == pytest.approx(0.92, abs=1e-3)
+    assert fit.base_len_mm == pytest.approx(roomy.max_width_mm, abs=1e-3)
+    assert fit.needs_attention
+    assert any("间距" in n for n in fit.notes)
+
+
+def test_fit_shrinks_size_after_spacing_floor(metrics_of, roomy):
+    """间距压到下限还超宽，才缩字号。"""
+    floor_width = metrics.predict_width(metrics_of, "GRACIE", SIZE, roomy.min_spacing, 0.0)
+    roomy.max_width_mm = roomy.base_len_for(floor_width * 0.85)
+
+    fit = metrics.fit(metrics_of, "GRACIE", roomy)
+    assert fit.status == "size_shrunk"
+    assert fit.spacing == pytest.approx(roomy.min_spacing)
+    assert roomy.hard_min_size_mm < fit.size_mm < SIZE
+    assert fit.base_len_mm <= roomy.max_width_mm + 1e-6
+    assert any("字号再缩到" in n for n in fit.notes)
+
+
+def test_fit_marks_too_long_with_suggestion(metrics_of, roomy):
+    roomy.max_width_mm = 12.0
+    fit = metrics.fit(metrics_of, "GRACIE", roomy)
+    assert fit.status == "too_long"
+    assert not fit.ok
+    assert fit.size_mm == pytest.approx(roomy.hard_min_size_mm)
+    assert any("建议把上限加到" in n for n in fit.notes)
+    assert fit.label == "超长"
+
+
+def test_fit_caps_size_when_base_too_narrow(metrics_of):
+    spec = StampSpec(font_size_mm=9.0, base_width_mm=6.0)
+    fit = metrics.fit(metrics_of, "BELLA", spec)
+    assert fit.status == "size_capped"
+    assert fit.size_mm < 9.0
+    # 提示必须告诉用户把底座加宽到多少才能用回原字号
+    assert any("底座宽度加到" in n for n in fit.notes)
+    assert fit.label == "限字高"
+
+
+def test_fit_capped_size_fits_base_width(metrics_of):
+    spec = StampSpec(font_size_mm=9.0, base_width_mm=6.0)
+    fit = metrics.fit(metrics_of, "BELLA", spec)
+    assert metrics.cap_height_mm(metrics_of, fit.size_mm) <= spec.base_width_mm + 1e-9
+
+
+def test_fit_ignores_hairline_overhang(metrics_of):
+    """0.05mm 以内的溢出是打印容差，不该为此把字号压掉一截。"""
+    spec = StampSpec(font_size_mm=6.0)
+    spec.base_width_mm = metrics.cap_height_mm(metrics_of, 6.0) - 0.03
     fit = metrics.fit(metrics_of, "BELLA", spec)
     assert fit.status == "ok"
-    assert fit.width_mm == pytest.approx(spec.available_mm(), rel=0.02)
+    assert fit.size_mm == pytest.approx(6.0)
 
 
-def test_fit_short_name_underfills(metrics_of, spec):
-    fit = metrics.fit(metrics_of, "AVA", spec)
-    assert fit.status == "underfill"
-    assert fit.fill_ratio < 1.0
-    assert fit.spacing == pytest.approx(spec.max_spacing)
-    # 提示里要给出可执行的下一步，而不只是"填不满"
-    assert any("建议目标宽度改为约" in n for n in fit.notes)
+def test_fit_caps_when_overhang_exceeds_tolerance(metrics_of):
+    spec = StampSpec(font_size_mm=6.0)
+    spec.base_width_mm = metrics.cap_height_mm(metrics_of, 6.0) - 0.2
+    assert metrics.fit(metrics_of, "BELLA", spec).status == "size_capped"
 
 
-def test_fit_long_name_reports_suggestion(metrics_of, spec):
-    fit = metrics.fit(metrics_of, "AUDREY  HEPBURN", spec)
-    assert fit.status in {"too_long", "spacing_min"}
-    if fit.status == "too_long":
-        assert any("建议底座宽度" in n for n in fit.notes)
+def test_capped_note_mentions_bold_expansion(metrics_of):
+    """加粗把字高顶出底座时，文案必须把加粗算进去，不能自相矛盾。"""
+    spec = StampSpec(font_size_mm=6.0, weight_offset_mm=0.25)
+    spec.base_width_mm = metrics.cap_height_mm(metrics_of, 6.0) + 0.2
+    fit = metrics.fit(metrics_of, "BELLA", spec)
+    assert fit.status == "size_capped"
+    note = " ".join(fit.notes)
+    assert "加加粗" in note and "共" in note
 
 
 def test_fit_empty_name(metrics_of, spec):
@@ -80,23 +204,52 @@ def test_fit_empty_name(metrics_of, spec):
 def test_fit_missing_glyph(metrics_of, spec):
     fit = metrics.fit(metrics_of, "名字", spec)
     assert fit.status == "missing_glyph"
+    assert not fit.ok
 
 
 def test_fit_invalid_when_margin_too_large(metrics_of):
-    spec = StampSpec(target_width_mm=10.0, margin_mm=6.0)
+    spec = StampSpec(max_width_mm=10.0, margin_mm=6.0)
     fit = metrics.fit(metrics_of, "BELLA", spec)
     assert fit.status == "invalid"
+    assert not fit.ok
 
 
-def test_weight_offset_widens(metrics_of):
-    plain = metrics.predict_width(metrics_of, "BELLA", 5.0, 1.0, 0.0)
-    bold = metrics.predict_width(metrics_of, "BELLA", 5.0, 1.0, 0.2)
-    assert bold - plain == pytest.approx(0.4, abs=1e-6)
+def test_fit_respects_probe_scale(metrics_of, roomy):
+    """实测比预测宽 2% 时，压缩判断也必须按实测口径来。"""
+    width = metrics.predict_width(metrics_of, "BELLA", SIZE, roomy.letter_spacing, 0.0)
+    roomy.max_width_mm = roomy.base_len_for(width) * 1.01  # 只留 1% 余量
+    fit = metrics.fit(metrics_of, "BELLA", roomy, width_scale=1.02)
+    assert fit.status != "ok"
+    assert fit.base_len_mm <= roomy.max_width_mm + 1e-6
 
 
-def test_size_from_probe_is_linear():
-    assert metrics.size_from_probe(20.0, 10.0, 30.0) == pytest.approx(15.0)
-    assert metrics.size_from_probe(0.0, 10.0, 30.0) == 0.0
+def test_fit_base_len_accounts_for_margin(metrics_of, roomy):
+    fit = metrics.fit(metrics_of, "BELLA", roomy)
+    assert fit.base_len_mm == pytest.approx(
+        fit.width_mm + 2 * roomy.margin_mm + 2 * roomy.weight_offset_mm, abs=1e-3
+    )
+
+
+# ---------------- 状态与精度 ----------------
+
+
+def test_every_status_has_short_label():
+    for status in metrics.STATUS_LABELS:
+        assert len(metrics.STATUS_LABELS[status]) <= 4
+
+
+def test_detail_falls_back_to_label(metrics_of, roomy):
+    """没有额外说明时，悬停提示就用短标签，不能是空串。"""
+    fit = metrics.fit(metrics_of, "BELLA", roomy)
+    assert fit.notes == []
+    assert fit.detail == fit.label == "正常"
+
+
+def test_detail_carries_reason_when_compressed(metrics_of, roomy):
+    roomy.max_width_mm = 12.0
+    fit = metrics.fit(metrics_of, "GRACIE", roomy)
+    assert fit.detail != fit.label
+    assert len(fit.detail) > len(fit.label)
 
 
 def test_resolve_curve_prefers_explicit_values(face, spec):
@@ -109,82 +262,3 @@ def test_resolve_curve_auto_for_dense_font(face, spec):
     if not face.is_dense_outline:
         pytest.skip("该字体不是密集轮廓")
     assert metrics.resolve_curve(face, spec) == metrics.CURVE_DENSE
-
-
-# ---------------- 固定字号模式（auto）----------------
-
-
-def test_fit_auto_keeps_requested_size(metrics_of, spec):
-    """字高装得下就必须保留用户给的字号，不能按 edge 余量偷偷压小。
-
-    旧版一直是"字号 = 底座宽"这种贴边用法，字高通常略小于底座宽就能打印。
-    这里若按 edge_mm=0.2 的舒适余量去压，成品就和旧版对不上了。
-    """
-    spec.width_mode = "auto"
-    spec.auto_size_mm = 6.0
-    # 底座宽度按该字体的实际字高给（不同字体字高比不同，不能写死 6.0）
-    spec.base_width_mm = metrics.cap_height_mm(metrics_of, 6.0) + 0.1
-
-    fit = metrics.fit_auto(metrics_of, "BELLA", spec)
-    assert fit.size_mm == pytest.approx(6.0)
-    assert fit.status == "ok"
-    assert metrics.cap_height_mm(metrics_of, fit.size_mm) <= spec.base_width_mm
-
-
-def test_fit_auto_caps_when_base_too_narrow(metrics_of):
-    spec = StampSpec(width_mode="auto", auto_size_mm=9.0, base_width_mm=6.0)
-    fit = metrics.fit_auto(metrics_of, "BELLA", spec)
-    assert fit.status == "size_capped"
-    assert fit.size_mm < 9.0
-    # 提示必须告诉用户把底座加宽到多少才能用回原字号
-    assert any("底座宽度加到" in n for n in fit.notes)
-
-
-def test_fit_auto_size_stays_constant_across_names(metrics_of, spec):
-    spec.width_mode = "auto"
-    short = metrics.fit_auto(metrics_of, "AVA", spec)
-    long = metrics.fit_auto(metrics_of, "GRACIE", spec)
-    assert short.size_mm == pytest.approx(long.size_mm)
-    assert long.base_len_mm > short.base_len_mm
-
-
-def test_fit_auto_spacing_and_weight_widen(metrics_of, spec):
-    spec.width_mode = "auto"
-    spec.auto_spacing = 1.0
-    base = metrics.fit_auto(metrics_of, "BELLA", spec).width_mm
-
-    spec.auto_spacing = 1.4
-    wider = metrics.fit_auto(metrics_of, "BELLA", spec).width_mm
-    assert wider > base
-
-    spec.auto_spacing = 1.0
-    spec.weight_offset_mm = 0.2
-    bold = metrics.fit_auto(metrics_of, "BELLA", spec).width_mm
-    assert bold - base == pytest.approx(0.4, abs=1e-6)
-
-
-def test_fit_auto_margin_widens_base(metrics_of, spec):
-    spec.width_mode = "auto"
-    spec.margin_mm = 1.5
-    tight = metrics.fit_auto(metrics_of, "BELLA", spec).base_len_mm
-    spec.margin_mm = 6.0
-    loose = metrics.fit_auto(metrics_of, "BELLA", spec).base_len_mm
-    assert loose - tight == pytest.approx(9.0)
-
-
-def test_fit_auto_rejects_missing_glyph(metrics_of, spec):
-    spec.width_mode = "auto"
-    fit = metrics.fit_auto(metrics_of, "名字", spec)
-    assert fit.status == "missing_glyph"
-    assert not fit.ok
-
-
-def test_fit_auto_empty(metrics_of, spec):
-    spec.width_mode = "auto"
-    assert metrics.fit_auto(metrics_of, "  ", spec).status == "empty"
-
-
-def test_fit_sets_base_len_to_target(metrics_of, spec):
-    """fixed 模式下底座长度恒等于目标宽度。"""
-    fit = metrics.fit(metrics_of, "BELLA", spec)
-    assert fit.base_len_mm == pytest.approx(spec.target_width_mm)
