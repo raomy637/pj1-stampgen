@@ -49,6 +49,18 @@ def test_dedupe_keeps_first_occurrence():
     assert duplicates == ["A", "B"]
 
 
+def test_dedupe_is_case_insensitive():
+    """Windows 文件名不区分大小写，DAISY 和 Daisy 会写进同一个文件。"""
+    unique, duplicates = validate.dedupe(["DAISY", "Daisy", "daisy", "TESS"])
+    assert unique == ["DAISY", "TESS"]
+    assert duplicates == ["Daisy", "daisy"]
+
+
+def test_case_only_duplicate_explains_why(metrics_of, spec):
+    issues = validate.validate_batch(["DAISY", "Daisy"], metrics_of, spec)
+    assert any("仅大小写不同" in i.message for i in issues["Daisy"])
+
+
 def test_clean_name_has_no_blocking_issues(metrics_of, spec):
     issues = validate.validate_batch(["BELLA"], metrics_of, spec)
     assert validate.blocking_issues(issues["BELLA"]) == []
@@ -127,36 +139,79 @@ def test_check_spec_weight_over_limit(metrics_of):
     assert fix["weight_offset_mm"] == 0.3
 
 
-def test_check_spec_cap_over_base_width(metrics_of):
-    """底座比墨迹还窄 —— 必须提示并给出建议底座宽度，且点名是哪个名字。"""
+def test_check_spec_reports_widened_base(metrics_of):
+    """默认会自动加宽，所以这是「已经处理好了」的告知，不是催用户改。"""
     spec = StampSpec(font_size_mm=6.0)
     spec.base_width_mm = metrics.ink_height_mm(metrics_of, "BELLA", 6.0) - 0.6
     issues = validate.check_spec(metrics_of, spec, ["BELLA"])
-    issue = next(i for i in issues if i.code == "cap_over_base")
+    issue = next(i for i in issues if i.code == "base_widened")
+    assert issue.level == validate.INFO
     assert not issue.is_error
     assert "BELLA" in issue.message
+    assert issue.action_label.startswith("统一为")
     assert issue.fix["base_width_mm"] > spec.base_width_mm
+
+
+def test_check_spec_warns_when_widen_disabled(metrics_of):
+    """关掉自动加宽后才变成「会缩字号」的警告。"""
+    spec = StampSpec(font_size_mm=6.0, widen_base_per_name=False)
+    spec.base_width_mm = metrics.ink_height_mm(metrics_of, "BELLA", 6.0) - 0.6
+    issues = validate.check_spec(metrics_of, spec, ["BELLA"])
+    issue = next(i for i in issues if i.code == "cap_over_base")
+    assert issue.level == validate.WARN
+    assert issue.action_label == "采用"
+
+
+def test_check_spec_escalates_when_most_names_need_widening(metrics_of):
+    """超过半数名字都要加宽，说明全局值设小了，提示升级为警告。"""
+    spec = StampSpec(font_size_mm=6.0, base_width_mm=4.0)
+    issues = validate.check_spec(metrics_of, spec, ["TESS", "DAISY", "WALKER"])
+    issue = next(i for i in issues if i.code == "base_widened")
+    assert issue.level == validate.WARN
+    assert "建议整体调大" in issue.message
 
 
 def test_check_spec_no_cap_warning_when_base_is_wide(metrics_of):
     spec = StampSpec(font_size_mm=6.0)
     spec.base_width_mm = metrics.ink_height_mm(metrics_of, "BELLA", 6.0) + 0.3
-    assert "cap_over_base" not in _codes(validate.check_spec(metrics_of, spec, ["BELLA"]))
+    assert "base_widened" not in _codes(validate.check_spec(metrics_of, spec, ["BELLA"]))
 
 
 def test_check_spec_skips_cap_check_without_names(metrics_of):
     """没有具体名字就不猜字高 —— 用固定样本估只会误报。"""
     spec = StampSpec(font_size_mm=6.0, base_width_mm=4.0)
-    assert "cap_over_base" not in _codes(validate.check_spec(metrics_of, spec))
+    assert "base_widened" not in _codes(validate.check_spec(metrics_of, spec))
 
 
 def test_check_spec_flags_descender_name(metrics_of):
     spec = StampSpec(font_size_mm=6.0)
     spec.base_width_mm = metrics.ink_height_mm(metrics_of, "DAISY", 6.0) + 0.05
     issues = validate.check_spec(metrics_of, spec, ["DAISY", "Daisy"])
-    issue = next(i for i in issues if i.code == "cap_over_base")
+    issue = next(i for i in issues if i.code == "base_widened")
     assert "Daisy" in issue.message
-    assert "下沉字母" in issue.message
+
+
+# ---------------- 不可生成的名字不参与参数建议 ----------------
+
+
+def test_renderable_names_filters_unusable(metrics_of):
+    spec = StampSpec(max_chars=5)
+    names = ["TESS", "方法喱", "TOOLONGNAME", "", "BELLA"]
+    assert validate.renderable_names(names, metrics_of, spec) == ["TESS", "BELLA"]
+
+
+def test_check_spec_ignores_unrenderable_names(metrics_of):
+    """截图里的坑：中文名会被跳过，不能拿它算字高、给出假警报。"""
+    spec = StampSpec(base_width_mm=6.6, font_size_mm=6.0, weight_offset_mm=0.18)
+    names = ["TESS", "LEELA", "DAISY", "KHLOE", "WALKER", "LORNA", "方法喱"]
+    assert validate.check_spec(metrics_of, spec, names) == []
+
+
+def test_ink_ratio_does_not_inflate_missing_glyphs(metrics_of):
+    """一个字形都没有时不能拿大写字母集合顶替，那会算出 6.85mm 的假数。"""
+    fallback = metrics.ink_ratio(metrics_of, "方法喱")
+    assert fallback == pytest.approx(metrics_of.cap_ratio())
+    assert fallback < metrics.ink_ratio(metrics_of, "")
 
 
 def test_check_spec_max_width_too_small(metrics_of):

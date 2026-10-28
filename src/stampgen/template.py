@@ -24,6 +24,7 @@ class RenderParams:
     font_family: str
     font_style: str
     weight_offset: float
+    outline_fix: float
     text_offset_y: float
     curve_fa: float
     curve_fs: float
@@ -38,6 +39,7 @@ class RenderParams:
         metrics: FaceMetrics | None = None,
         base_len: float | None = None,
         curve: tuple[float, float] | None = None,
+        outline_fix: float = 0.0,
     ) -> "RenderParams":
         offset_y = 0.0
         if metrics is not None:
@@ -46,10 +48,12 @@ class RenderParams:
         # 底座长度逐名不同，由 fit.base_len_mm 给出（= 文字宽 + 两侧留白）。
         # 空名字不会走到渲染，这里只做一次兜底。
         length = fit.base_len_mm if fit.base_len_mm > 0 else spec.base_len_for(0.0)
+        # 底座宽度也逐名：个别名字墨迹太高时会被单独加宽
+        width = fit.base_width_mm if fit.base_width_mm > 0 else spec.base_width_mm
         return cls(
             name=name,
             base_len=round(length if base_len is None else base_len, 3),
-            base_width=round(spec.base_width_mm, 3),
+            base_width=round(width, 3),
             base_height=round(spec.base_height_mm, 3),
             letter_size=round(fit.size_mm, 4),
             letter_spacing=round(fit.spacing, 4),
@@ -57,6 +61,7 @@ class RenderParams:
             font_family=face.family,
             font_style=face.style,
             weight_offset=round(spec.weight_offset_mm, 4),
+            outline_fix=round(outline_fix, 4),
             text_offset_y=round(offset_y, 4),
             curve_fa=round(fa, 3),
             curve_fs=round(fs, 3),
@@ -89,6 +94,7 @@ def to_defines(params: RenderParams) -> list[str]:
         ("font_family", params.font_family),
         ("font_style", params.font_style),
         ("weight_offset", params.weight_offset),
+        ("outline_fix", params.outline_fix),
         ("text_offset_y", params.text_offset_y),
         ("curve_fa", params.curve_fa),
         ("curve_fs", params.curve_fs),
@@ -114,6 +120,7 @@ def preview_scad(params: RenderParams, template: Path) -> str:
             ("font_family", params.font_family),
             ("font_style", params.font_style),
             ("weight_offset", params.weight_offset),
+            ("outline_fix", params.outline_fix),
             ("text_offset_y", params.text_offset_y),
             ("curve_fa", params.curve_fa),
             ("curve_fs", params.curve_fs),

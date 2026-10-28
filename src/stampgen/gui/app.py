@@ -35,6 +35,7 @@ COLOR_OK = "#0f6e56"
 COLOR_WARN = "#854f0b"
 COLOR_ERR = "#a32d2d"
 COLOR_MUTED = "#5f5e5a"
+COLOR_INFO = "#185fa5"
 COLOR_PREVIEW_BG = "#fbfbf9"
 COLOR_PREVIEW_BORDER = "#d8d8d4"
 
@@ -44,6 +45,18 @@ BUILTIN_TEMPLATE_LABEL = "（内置模板）"
 界面上直接显示那个临时路径会让人以为要维护它，所以只显示这个占位文案；
 用户真要自定义模板，点「选择文件」指到自己的 .scad 即可。
 """
+
+_FIELD_LABELS = {
+    "base_width_mm": ("底座宽度", "mm"),
+    "base_height_mm": ("底座高度", "mm"),
+    "max_width_mm": ("最长不超过", "mm"),
+    "margin_mm": ("左右留白", "mm"),
+    "letter_height_mm": ("字体高度", "mm"),
+    "font_size_mm": ("字号", "mm"),
+    "letter_spacing": ("字间距", ""),
+    "weight_offset_mm": ("几何加粗", "mm"),
+}
+"""「采用」之后要在状态栏说清改了哪个参数，这里是字段 → 中文名 + 单位。"""
 
 STATUS_MAX_CHARS = 66
 """状态栏最多显示的字数。超出截断并加省略号 —— 完整信息看日志。"""
@@ -88,10 +101,12 @@ class StampApp:
         self._tip: tk.Toplevel | None = None
         self._preview_job: str | None = None
         self._persist_job: str | None = None
+        self._spec_widgets: dict[str, ttk.Entry] = {}
+        """字段名 → 输入框，用于「采用」之后聚焦选中。"""
 
         root.title(APP_TITLE)
-        root.geometry("1160x880")
-        root.minsize(1040, 780)
+        root.geometry("1160x920")
+        root.minsize(1040, 800)
         self._set_icon()
 
         self._build_vars()
@@ -123,6 +138,7 @@ class StampApp:
         self.var_max_w = tk.StringVar(value=f"{spec.max_width_mm:g}")
         self.var_margin = tk.StringVar(value=f"{spec.margin_mm:g}")
         self.var_letter_h = tk.StringVar(value=f"{spec.letter_height_mm:g}")
+        self.var_widen = tk.BooleanVar(value=spec.widen_base_per_name)
 
         # 字体
         self.var_family = tk.StringVar()
@@ -192,24 +208,35 @@ class StampApp:
     def _build_geometry(self, parent: ttk.Frame) -> ttk.Widget:
         box = ttk.LabelFrame(parent, text=" 印章几何 ", padding=(10, 6))
         pairs = [
-            ("底座宽度 mm", self.var_base_w),
-            ("底座高度 mm", self.var_base_h),
-            ("最长不超过 mm", self.var_max_w),
-            ("左右留白 mm", self.var_margin),
-            ("字体高度 mm", self.var_letter_h),
+            ("底座宽度 mm", self.var_base_w, "base_width_mm"),
+            ("底座高度 mm", self.var_base_h, "base_height_mm"),
+            ("最长不超过 mm", self.var_max_w, "max_width_mm"),
+            ("左右留白 mm", self.var_margin, "margin_mm"),
+            ("字体高度 mm", self.var_letter_h, "letter_height_mm"),
         ]
         col = 0
-        for i, (label, var) in enumerate(pairs):
+        for i, (label, var, field) in enumerate(pairs):
             ttk.Label(box, text=label).grid(
                 row=0, column=col, sticky="e", padx=(0 if i == 0 else 16, 6), pady=2
             )
-            self._entry(box, var).grid(row=0, column=col + 1, sticky="w", pady=2)
+            ent = self._entry(box, var)
+            ent.grid(row=0, column=col + 1, sticky="w", pady=2)
+            self._spec_widgets[field] = ent
             col += 2
+
+        opts = ttk.Frame(box)
+        opts.grid(row=1, column=0, columnspan=col, sticky="we", pady=(6, 0))
+        ttk.Checkbutton(
+            opts,
+            text="个别名字装不下时加宽它的底座（不缩字）",
+            variable=self.var_widen,
+            command=self._schedule_preview,
+        ).pack(side="left")
         ttk.Label(
-            box,
+            opts,
             text="底座长度按名字自动算，短名字不会硬撑到上限",
             foreground=COLOR_MUTED,
-        ).grid(row=0, column=col, sticky="w", padx=(20, 0), pady=2)
+        ).pack(side="left", padx=(20, 0))
         return box
 
     def _build_font(self, parent: ttk.Frame) -> ttk.Widget:
@@ -232,10 +259,14 @@ class StampApp:
         self.cmb_style.bind("<<ComboboxSelected>>", lambda _e: self._schedule_preview())
 
         ttk.Label(box, text="字号 mm").grid(row=0, column=4, sticky="e", padx=(16, 6), pady=2)
-        self._entry(box, self.var_size, 7).grid(row=0, column=5, sticky="w", pady=2)
+        ent_size = self._entry(box, self.var_size, 7)
+        ent_size.grid(row=0, column=5, sticky="w", pady=2)
+        self._spec_widgets["font_size_mm"] = ent_size
 
         ttk.Label(box, text="字间距").grid(row=0, column=6, sticky="e", padx=(16, 6), pady=2)
-        self._entry(box, self.var_spacing, 7).grid(row=0, column=7, sticky="w", pady=2)
+        ent_spacing = self._entry(box, self.var_spacing, 7)
+        ent_spacing.grid(row=0, column=7, sticky="w", pady=2)
+        self._spec_widgets["letter_spacing"] = ent_spacing
 
         ttk.Label(box, text="几何加粗 mm").grid(row=0, column=8, sticky="e", padx=(16, 6), pady=2)
         spin_weight = ttk.Spinbox(
@@ -249,6 +280,7 @@ class StampApp:
         )
         spin_weight.grid(row=0, column=9, sticky="w", pady=2)
         spin_weight.bind("<FocusOut>", lambda _e: self._schedule_preview())
+        self._spec_widgets["weight_offset_mm"] = spin_weight  # type: ignore[assignment]
 
         ttk.Label(box, text="大小写").grid(row=0, column=10, sticky="e", padx=(16, 6), pady=2)
         self.cmb_case = ttk.Combobox(
@@ -264,7 +296,7 @@ class StampApp:
         # 固定高度的预览容器：图换尺寸时布局不跳
         self.preview_holder = tk.Frame(
             box,
-            height=78,
+            height=70,
             background=COLOR_PREVIEW_BG,
             highlightthickness=1,
             highlightbackground=COLOR_PREVIEW_BORDER,
@@ -389,19 +421,30 @@ class StampApp:
         paned = ttk.Panedwindow(parent, orient=tk.VERTICAL)
 
         result_box = ttk.LabelFrame(paned, text=" 结果预览 ", padding=(8, 6))
-        cols = ("no", "name", "chars", "size", "spacing", "base_len", "status", "spacer")
+        cols = (
+            "no",
+            "name",
+            "chars",
+            "size",
+            "spacing",
+            "base_w",
+            "base_len",
+            "status",
+            "spacer",
+        )
         headings = {
             "no": ("序号", 44, "center", False),
-            "name": ("名字", 260, "w", False),
+            "name": ("名字", 240, "w", False),
             "chars": ("字符", 46, "center", False),
             "size": ("字号 mm", 68, "center", False),
             "spacing": ("间距", 56, "center", False),
+            "base_w": ("底座宽 mm", 84, "center", False),
             "base_len": ("底座长 mm", 84, "center", False),
             "status": ("状态", 74, "center", False),
             # 占位列：把多余宽度收在表格最右侧，名字列就不会被拉成一片空白
             "spacer": ("", 20, "w", True),
         }
-        self.tree = ttk.Treeview(result_box, columns=cols, show="headings", height=8)
+        self.tree = ttk.Treeview(result_box, columns=cols, show="headings", height=12)
         for key in cols:
             text, width, anchor, stretch = headings[key]
             self.tree.heading(key, text=text)
@@ -416,15 +459,15 @@ class StampApp:
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side="left", fill=tk.BOTH, expand=True)
         scroll.pack(side="right", fill="y")
-        paned.add(result_box, weight=3)
+        paned.add(result_box, weight=5)
 
         log_box = ttk.LabelFrame(paned, text=" 运行日志 ", padding=(8, 6))
-        self.txt_log = tk.Text(log_box, height=8, wrap="word", state="disabled")
+        self.txt_log = tk.Text(log_box, height=3, wrap="word", state="disabled")
         log_scroll = ttk.Scrollbar(log_box, orient="vertical", command=self.txt_log.yview)
         self.txt_log.configure(yscrollcommand=log_scroll.set)
         self.txt_log.pack(side="left", fill=tk.BOTH, expand=True)
         log_scroll.pack(side="right", fill="y")
-        paned.add(log_box, weight=2)
+        paned.add(log_box, weight=1)
         return paned
 
     def _build_actions(self, parent: ttk.Frame) -> ttk.Widget:
@@ -552,6 +595,7 @@ class StampApp:
         spec.letter_spacing = num(self.var_spacing, "字间距", 0.1)
         spec.weight_offset_mm = num(self.var_weight, "几何加粗")
         spec.case_mode = self._case_mode()
+        spec.widen_base_per_name = bool(self.var_widen.get())
 
         raw_workers = (self.var_workers.get() or "").strip()
         if raw_workers:
@@ -769,39 +813,61 @@ class StampApp:
 
     # ---------------- 提示带 ----------------
 
+    _HINT_STYLE = {
+        validate.ERROR: ("✕", COLOR_ERR),
+        validate.WARN: ("!", COLOR_WARN),
+        validate.INFO: ("i", COLOR_INFO),
+    }
+
     def _render_hints(self, issues: list[validate.SpecIssue]) -> None:
         for child in self.hint_frame.winfo_children():
             child.destroy()
         for issue in issues[:3]:
             row = ttk.Frame(self.hint_frame)
             row.pack(fill="x", pady=1)
-            color = COLOR_ERR if issue.is_error else COLOR_WARN
-            tk.Label(
-                row, text="✕" if issue.is_error else "!", fg=color, font=("", 10, "bold")
-            ).pack(side="left")
+            mark, color = self._HINT_STYLE.get(issue.level, ("!", COLOR_WARN))
+            tk.Label(row, text=mark, fg=color, font=("", 10, "bold")).pack(side="left")
             tk.Label(
                 row,
                 text=issue.message,
                 fg=color,
                 anchor="w",
                 justify="left",
-                wraplength=820,
+                wraplength=780,
             ).pack(side="left", padx=(6, 0))
             if issue.fixable:
+                # 按钮文字由问题自己决定：全局参数类叫「采用」，
+                # 个别名字加宽类叫「统一为 7.20mm」—— 点之前就知道它影响全部
                 ttk.Button(
                     row,
-                    text="采用",
-                    width=6,
-                    command=lambda fix=issue.fix: self._apply_fix(fix),
+                    text=issue.action_label,
+                    command=lambda i=issue: self._apply_fix(i.fix, i.action_label),
                 ).pack(side="left", padx=(10, 0))
 
-    def _apply_fix(self, fix: dict) -> None:
+    def _apply_fix(self, fix: dict, action_label: str = "采用") -> None:
+        changed: list[tuple[str, str]] = []
         for key, value in fix.items():
             var = self._spec_vars.get(key)
             if var is None:
                 continue
-            var.set(f"{value:g}" if isinstance(value, float) else str(value))
+            text = f"{value:g}" if isinstance(value, float) else str(value)
+            var.set(text)
+            changed.append((key, text))
         self._schedule_preview()
+        if not changed:
+            return
+        # 把改动的输入框顶到眼前：聚焦 + 选中文字。
+        # 光靠"值变了"用户注意不到，光标落在那个框上就一眼看见了。
+        key, text = changed[0]
+        widget = self._spec_widgets.get(key)
+        if widget is not None:
+            try:
+                widget.focus_set()
+                widget.selection_range(0, "end")
+            except tk.TclError:
+                pass
+        name, unit = _FIELD_LABELS.get(key, (key, ""))
+        self._set_status(f"已把{name}改为 {text}{unit}（全部名字适用）")
 
     # ---------------- 悬停提示 ----------------
 
@@ -881,10 +947,11 @@ class StampApp:
 
         ok_count = 0
         lengths: list[float] = []
+        widths: list[float] = []
         for index, name in enumerate(unique, start=1):
             blocking = validate.blocking_issues(name_issues.get(name, []))
             if blocking:
-                values = (index, name, len(name), "", "", "", "跳过", "")
+                values = (index, name, len(name), "", "", "", "", "跳过", "")
                 tag = "err"
                 detail = validate.format_issues(blocking)
             else:
@@ -901,6 +968,7 @@ class StampApp:
                     len(name),
                     f"{fit.size_mm:.2f}",
                     f"{fit.spacing:.2f}",
+                    f"{fit.base_width_mm:.2f}",
                     f"{fit.base_len_mm:.2f}",
                     fit.label,
                     "",
@@ -910,6 +978,7 @@ class StampApp:
                 if fit.ok:
                     ok_count += 1
                     lengths.append(fit.base_len_mm)
+                    widths.append(fit.base_width_mm)
             iid = self.tree.insert("", "end", values=values, tags=(tag,))
             self._row_detail[iid] = detail
 
@@ -917,13 +986,16 @@ class StampApp:
             iid = self.tree.insert(
                 "",
                 "end",
-                values=("—", name, len(name), "", "", "", "重名", ""),
+                values=("—", name, len(name), "", "", "", "", "重名", ""),
                 tags=("err",),
             )
             self._row_detail[iid] = "与本批次前面重名，只生成一次"
 
-        span = f"，底座 {min(lengths):.1f}~{max(lengths):.1f}mm" if lengths else ""
-        self._set_status(f"可生成 {ok_count}/{len(unique)}{span}　|　{face.label}")
+        # 字体名上面的下拉框里已经显示了，状态栏留给尺寸
+        span = f"，底座长 {min(lengths):.1f}~{max(lengths):.1f}mm" if lengths else ""
+        if widths and max(widths) - min(widths) > 0.05:
+            span += f"，宽 {min(widths):.1f}~{max(widths):.1f}mm"
+        self._set_status(f"可生成 {ok_count}/{len(unique)}{span}")
 
     # ---------------- 生成 ----------------
 

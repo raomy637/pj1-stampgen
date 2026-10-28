@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from .config import StampSpec
@@ -65,6 +66,7 @@ UPPERCASE_SAMPLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 STATUS_LABELS = {
     "ok": "正常",
     "spacing_compressed": "已压缩",
+    "wider_base": "加宽",
     "size_capped": "限字高",
     "size_shrunk": "已缩字",
     "too_long": "超长",
@@ -81,6 +83,7 @@ STATUS_LABELS = {
 _SEVERITY = {
     "ok": 0,
     "spacing_compressed": 1,
+    "wider_base": 2,
     "size_capped": 2,
     "size_shrunk": 3,
     "too_long": 4,
@@ -89,7 +92,7 @@ _SEVERITY = {
     "invalid": 8,
 }
 
-_ATTENTION = {"spacing_compressed", "size_capped", "size_shrunk"}
+_ATTENTION = {"spacing_compressed", "wider_base", "size_capped", "size_shrunk"}
 _BLOCKING = {"too_long", "empty", "missing_glyph", "invalid"}
 
 
@@ -123,6 +126,13 @@ class FitResult:
 
     base_len_mm: float
     """底座长度 = 文字宽 + 2 × 留白 + 2 × 加粗。"""
+
+    base_width_mm: float = 0.0
+    """该名字实际使用的底座宽度（Y 向）。
+
+    通常等于 ``spec.base_width_mm``；名字里的墨迹太高（g/y/p 下沉）
+    且开启了逐名加宽时，会单独变宽。
+    """
 
     status: str = "ok"
     notes: list[str] = field(default_factory=list)
@@ -203,8 +213,15 @@ def ink_ratio(metrics: FaceMetrics, text: str = "") -> float:
     文字是垂直居中的，占的是墨迹包围盒（含圆形字母的 overshoot、
     含 g/y/p 的下沉部分），所以直接量这个高度。
     传空字符串时用大写字母集合估字体的一般情况。
+
+    **一个字都没有的文字（如中文名）不能拿大写字母集合顶替** ——
+    那会算出 6.85mm 这种虚高值，触发「底座不够宽」的假警报，而这类名字
+    本来就会被判为缺字跳过。这里直接退回 cap_ratio，不让它参与判断。
     """
-    boxes = _v_boxes(metrics, text) or _v_boxes(metrics, UPPERCASE_SAMPLE)
+    boxes = _v_boxes(metrics, text)
+    if text and not boxes:
+        return metrics.cap_ratio()
+    boxes = boxes or _v_boxes(metrics, UPPERCASE_SAMPLE)
     if boxes and metrics.upem:
         y_min = min(b[0] for b in boxes)
         y_max = max(b[1] for b in boxes)
@@ -313,6 +330,22 @@ def probe_scale(
     return probe_width_mm / predicted
 
 
+def _blank(
+    spacing: float, limit: float, base_width: float, status: str, message: str
+) -> FitResult:
+    """无解时的占位结果（空名字 / 缺字 / 参数无效）。"""
+    return FitResult(
+        size_mm=0.0,
+        spacing=spacing,
+        width_mm=0.0,
+        base_len_mm=0.0,
+        base_width_mm=base_width,
+        status=status,
+        notes=[message],
+        limit_mm=limit,
+    )
+
+
 def fit(
     metrics: FaceMetrics,
     text: str,
@@ -329,29 +362,29 @@ def fit(
     weight = max(0.0, spec.weight_offset_mm)
     spacing0 = spec.letter_spacing
 
+    base_width = spec.base_width_mm
+
     if not text:
-        return FitResult(0.0, spacing0, 0.0, 0.0, "empty", ["名字为空"], limit)
+        return _blank(spacing0, limit, base_width, "empty", "名字为空")
 
     missing = metrics.missing_chars(text)
     if missing:
-        return FitResult(
-            0.0, spacing0, 0.0, 0.0, "missing_glyph", [f"当前字体缺少字符：{''.join(missing)}"], limit
+        return _blank(
+            spacing0, limit, base_width, "missing_glyph", f"当前字体缺少字符：{''.join(missing)}"
         )
 
     if limit <= 0:
-        return FitResult(
-            0.0,
+        return _blank(
             spacing0,
-            0.0,
-            0.0,
-            "invalid",
-            [f"左右留白 2 × {spec.margin_mm:g}mm 已占满上限 {spec.max_width_mm:g}mm，请加大上限"],
             limit,
+            base_width,
+            "invalid",
+            f"左右留白 2 × {spec.margin_mm:g}mm 已占满上限 {spec.max_width_mm:g}mm，请加大上限",
         )
 
     k, c = ink_linear(metrics, text)
     if k <= 0 and c <= 0:
-        return FitResult(0.0, spacing0, 0.0, 0.0, "invalid", ["字体度量为空"], limit)
+        return _blank(spacing0, limit, base_width, "invalid", "字体度量为空")
 
     scale = width_scale if width_scale > 0 else 1.0
     # 预测宽 × scale ≤ limit  ⇔  预测宽 ≤ limit / scale
@@ -369,20 +402,28 @@ def fit(
     ink = ink_height_mm(metrics, text, size)
     total = ink + 2.0 * weight
     if total > spec.base_width_mm + GEOMETRY_TOLERANCE_MM:
-        size = size_cap_from_base(metrics, spec, text)
-        status = _worse(status, "size_capped")
-        # 加粗会让墨迹上下各外扩 weight，必须一起算，否则文案会自相矛盾
-        # （"字高 5.88 超过 6.00" 这种）
         shape = f"墨迹高 {ink:.2f}mm" + (
             f" 加加粗 {2.0 * weight:.2f}mm 共 {total:.2f}mm" if weight > 0 else ""
         )
         if has_descender(metrics, text):
             shape += "（含下沉字母 g/y/p）"
-        notes.append(
-            f"字号 {spec.font_size_mm:.2f}mm 的{shape}超过底座宽度 "
-            f"{spec.base_width_mm:.2f}mm，已压到 {size:.2f}mm；"
-            f"想用原字号请把底座宽度加到 {total:.2f}mm"
-        )
+        if spec.widen_base_per_name:
+            # 字号是视觉主体：宁可让这一枚印章胖一点，也不把它压小。
+            # 向上取整到 0.1mm，再留 0.05mm 避免墨迹正好贴边。
+            base_width = math.ceil((total + 0.05) * 10) / 10
+            status = _worse(status, "wider_base")
+            notes.append(
+                f"{shape}，超过默认底座宽度 {spec.base_width_mm:.2f}mm，"
+                f"已把这一枚的底座加宽到 {base_width:.1f}mm（字号保持 {size:.2f}mm）"
+            )
+        else:
+            size = size_cap_from_base(metrics, spec, text)
+            status = _worse(status, "size_capped")
+            notes.append(
+                f"字号 {spec.font_size_mm:.2f}mm 的{shape}超过底座宽度 "
+                f"{spec.base_width_mm:.2f}mm，已压到 {size:.2f}mm；"
+                f"想用原字号请把底座宽度加到 {total:.2f}mm"
+            )
 
     # ---- 第二步：超宽则先压间距 ----
     raw = width_at(size, spacing)
@@ -435,6 +476,7 @@ def fit(
         spacing=round(spacing, 3),
         width_mm=round(width, 3),
         base_len_mm=round(base_len, 3),
+        base_width_mm=round(base_width, 3),
         status=status,
         notes=notes,
         limit_mm=limit,

@@ -17,6 +17,11 @@ letter_height  = is_undef(letter_height)  ? 6         : letter_height;
 font_family    = is_undef(font_family)    ? "Arial"   : font_family;
 font_style     = is_undef(font_style)     ? "Regular" : font_style;
 weight_offset  = is_undef(weight_offset)  ? 0         : weight_offset;
+// outline_fix > 0 时先对字形做一次极小的圆角外扩，用来修复自交轮廓。
+// 某些字母（如 Daziji 系列的小写 y）轮廓有重复点或自交，单独挤出看不出问题，
+// 但和底座做 union 时 CGAL 会报 "mesh is not closed" 并退化成只有底座。
+// offset(r=0.001) 会重建多边形，0.001mm 的尺寸影响可以忽略。
+outline_fix    = is_undef(outline_fix)    ? 0         : outline_fix;
 text_offset_y  = is_undef(text_offset_y)  ? 0         : text_offset_y;
 curve_fa       = is_undef(curve_fa)       ? 4         : curve_fa;
 curve_fs       = is_undef(curve_fs)       ? 0.4       : curve_fs;
@@ -39,11 +44,18 @@ module glyphs_2d() {
              valign  = "baseline");
 }
 
-module glyphs_weighted_2d() {
-    if (weight_offset > 0.001)
-        offset(delta = weight_offset) glyphs_2d();
+module glyphs_fixed_2d() {
+    if (outline_fix > 0)
+        offset(r = outline_fix) glyphs_2d();
     else
         glyphs_2d();
+}
+
+module glyphs_weighted_2d() {
+    if (weight_offset > 0.001)
+        offset(delta = weight_offset) glyphs_fixed_2d();
+    else
+        glyphs_fixed_2d();
 }
 
 module stamp_body() {

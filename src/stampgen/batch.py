@@ -46,6 +46,9 @@ class NameResult:
     base_len: float = 0.0
     """实际用于渲染的底座长度（逐名不同）。"""
 
+    base_width: float = 0.0
+    """实际用于渲染的底座宽度（Y 向，逐名不同：装不下的会被单独加宽）。"""
+
     fill_ratio: float = 0.0
     attempts: int = 0
     message: str = ""
@@ -80,10 +83,11 @@ class BatchReport:
             mark = {"ok": "OK", "skipped": "--", "failed": "NG"}.get(r.status, "??")
             measured = f"{r.measured_width:.2f}" if r.measured_width is not None else "-"
             base = f"{r.base_len:.2f}" if r.base_len else "-"
+            base_w = f"{r.base_width:.2f}" if r.base_width else "-"
             rows.append(
                 f"{mark} {console.pad(r.name, 16)}"
                 f" 字号 {r.size_mm:>5.2f}  间距 {r.spacing:>4.2f}"
-                f"  底座 {base:>6}  文字宽 {measured:>6}"
+                f"  底座 {base_w:>5}×{base:>6}  文字宽 {measured:>6}"
                 f"  {console.pad(r.label or '-', 7)}{r.message}"
             )
         return rows
@@ -167,6 +171,10 @@ def run_batch(
         f"字号 {spec.font_size_mm:g}mm、间距 {spec.letter_spacing:g}、"
         f"底座最长 {spec.max_width_mm:g}mm（短名字按实际宽度出，不补齐）"
     )
+    log(
+        f"底座宽度 {spec.base_width_mm:g}mm"
+        + ("（个别名字装不下时单独加宽，字号不变）" if spec.widen_base_per_name else "（装不下时压字号）")
+    )
     if case != "keep":
         log(f"大小写：{CASE_LABELS.get(case, case)}")
 
@@ -245,6 +253,7 @@ def run_batch(
                 predicted_width=fit.width_mm,
                 fill_ratio=fit.fill_ratio,
                 base_len=fit.base_len_mm,
+                base_width=fit.base_width_mm,
                 message=fit.detail,
                 label=fit.label,
             )
@@ -261,25 +270,38 @@ def run_batch(
             predicted_width=fit.width_mm,
             fill_ratio=fit.fill_ratio,
             base_len=fit.base_len_mm,
+            base_width=fit.base_width_mm,
             label=fit.label,
             message=fit.detail if fit.needs_attention else "",
         )
         current = fit
         attempts = 0
+        outline_fix = 0.0
 
         try:
             while True:
                 attempts += 1
                 params = template.RenderParams.build(
-                    name, face, spec, current, font_metrics, curve=curve
+                    name, face, spec, current, font_metrics, curve=curve, outline_fix=outline_fix
                 )
-                openscad.export_stl(exe, tpl, params, out_path, env)
+                try:
+                    openscad.export_stl(exe, tpl, params, out_path, env)
+                except openscad.OpenSCADError as exc:
+                    if outline_fix == 0.0 and "网格未闭合" in str(exc):
+                        # 某些字母轮廓自交，union 时 CGAL 会只留下底座。
+                        # offset(r=0.001) 能重建多边形，代价是 0.001mm 的外扩。
+                        outline_fix = 0.001
+                        attempts -= 1
+                        say(f"  修复 {name}：字形轮廓自交，启用轮廓修复后重渲染")
+                        continue
+                    raise
                 extent = openscad.stl_extent(out_path, z_above=z_probe)
                 result.measured_width = round(extent.width, 3)
                 result.measured_depth = round(extent.depth, 3)
                 result.size_mm = params.letter_size
                 result.spacing = params.letter_spacing
                 result.base_len = params.base_len
+                result.base_width = params.base_width
 
                 # 唯一的硬指标：成品总长不得超过上限
                 actual_base = spec.base_len_for(extent.width)
@@ -365,7 +387,7 @@ def run_batch(
         report.results.append(item)
         if item.status == "ok":
             report.generated += 1
-            if item.label in {"已压缩", "已缩字", "限字高", "已校正"}:
+            if item.label in {"已压缩", "已缩字", "限字高", "已校正", "加宽"}:
                 report.compressed += 1
         elif item.status == "skipped":
             report.skipped += 1
@@ -378,11 +400,11 @@ def run_batch(
             NameResult(
                 dup,
                 "skipped",
-                message="与本批次前面重名，只生成一次",
+                message="与前面某个名字重复（大小写不敏感，文件名会冲突），只生成一次",
                 label="跳过",
             )
         )
-        log(f"[跳过] {dup}：与本批次前面重名")
+        log(f"[跳过] {dup}：与前面某个名字重复（大小写不敏感）")
 
     report.elapsed = time.time() - started
     _write_manifest(cfg, face, report)

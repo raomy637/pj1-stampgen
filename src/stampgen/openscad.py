@@ -113,7 +113,16 @@ def export_stl(
         args += ["--export-format", "binstl"]
     args += to_defines(params)
     args.append(str(template))
-    _run(exe, args, env, timeout)
+    proc = _run(exe, args, env, timeout)
+
+    # CGAL 失败时 OpenSCAD 不会返回非零退出码，而是只把底座导出、
+    # 字母整个丢掉 —— 必须自己查输出，否则会静默产出没有字的印章。
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if "not closed" in output or "Unable to convert to CGAL_Nef_Polyhedron" in output:
+        raise OpenSCADError(
+            f"网格未闭合：字形轮廓自交，无法与底座合并（{out_path.name}）"
+        )
+
     if not out_path.is_file() or out_path.stat().st_size == 0:
         raise OpenSCADError(f"未生成有效 STL：{out_path}")
     return out_path

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from stampgen import metrics
@@ -174,53 +176,80 @@ def test_fit_marks_too_long_with_suggestion(metrics_of, roomy):
     assert fit.label == "超长"
 
 
-def test_fit_caps_size_when_base_too_narrow(metrics_of):
-    spec = StampSpec(font_size_mm=9.0, base_width_mm=6.0)
-    fit = metrics.fit(metrics_of, "BELLA", spec)
-    assert fit.status == "size_capped"
-    assert fit.size_mm < 9.0
-    # 提示必须告诉用户把底座加宽到多少才能用回原字号
-    assert any("底座宽度加到" in n for n in fit.notes)
-    assert fit.label == "限字高"
-
-
-def test_fit_capped_size_fits_base_width(metrics_of):
-    spec = StampSpec(font_size_mm=9.0, base_width_mm=6.0)
-    fit = metrics.fit(metrics_of, "BELLA", spec)
-    ink = metrics.ink_height_mm(metrics_of, "BELLA", fit.size_mm)
-    assert ink <= spec.base_width_mm + metrics.GEOMETRY_TOLERANCE_MM + 1e-9
-
-
 def test_fit_ignores_overshoot_within_tolerance(metrics_of):
-    """圆形字母的 overshoot 是字形设计，容差以内不该压字号。"""
+    """圆形字母的 overshoot 是字形设计，容差以内不该动任何东西。"""
     spec = StampSpec(font_size_mm=6.0)
     spec.base_width_mm = metrics.ink_height_mm(metrics_of, "BELLA", 6.0) - 0.1
     fit = metrics.fit(metrics_of, "BELLA", spec)
     assert fit.status == "ok"
     assert fit.size_mm == pytest.approx(6.0)
+    assert fit.base_width_mm == pytest.approx(spec.base_width_mm, abs=1e-3)
 
 
-def test_fit_caps_when_overhang_exceeds_tolerance(metrics_of):
+# ---------------- 逐名底座宽度 ----------------
+
+
+def test_fit_widens_base_instead_of_shrinking(metrics_of):
+    """装不下时默认加宽底座：字号是视觉主体，不能为它让步。"""
+    spec = StampSpec(font_size_mm=9.0, base_width_mm=6.0)
+    fit = metrics.fit(metrics_of, "BELLA", spec)
+    assert fit.status == "wider_base"
+    assert fit.size_mm == pytest.approx(9.0)
+    assert fit.base_width_mm > spec.base_width_mm
+    assert metrics.ink_height_mm(metrics_of, "BELLA", fit.size_mm) <= fit.base_width_mm + 1e-9
+
+
+def test_widen_rounds_up_to_tenth(metrics_of):
     spec = StampSpec(font_size_mm=6.0)
     spec.base_width_mm = metrics.ink_height_mm(metrics_of, "BELLA", 6.0) - 0.4
-    assert metrics.fit(metrics_of, "BELLA", spec).status == "size_capped"
+    fit = metrics.fit(metrics_of, "BELLA", spec)
+    total = metrics.ink_height_mm(metrics_of, "BELLA", 6.0)
+    assert fit.base_width_mm == pytest.approx(math.ceil((total + 0.05) * 10) / 10)
 
 
-def test_fit_caps_lowercase_with_descender(metrics_of, roomy):
-    """g/y/p 会沉到基线以下，同样的底座宽度就装不下了。"""
-    fit = metrics.fit(metrics_of, "Daisy", roomy)
+def test_other_names_keep_default_base_width(metrics_of):
+    """只有装不下的那个变宽，其余仍用默认值。"""
+    spec = StampSpec(font_size_mm=6.0, base_width_mm=6.6, weight_offset_mm=0.18)
+    short = metrics.fit(metrics_of, "TESS", spec)
+    tall = metrics.fit(metrics_of, "Daisy", spec)
+    assert short.base_width_mm == pytest.approx(6.6)
+    assert tall.base_width_mm > 6.6
+    assert tall.size_mm == pytest.approx(short.size_mm)
+
+
+def test_fit_caps_size_when_widen_disabled(metrics_of):
+    spec = StampSpec(font_size_mm=9.0, base_width_mm=6.0, widen_base_per_name=False)
+    fit = metrics.fit(metrics_of, "BELLA", spec)
     assert fit.status == "size_capped"
+    assert fit.size_mm < 9.0
+    assert fit.base_width_mm == pytest.approx(6.0)
+    assert any("底座宽度加到" in n for n in fit.notes)
+
+
+def test_fit_widens_for_descender(metrics_of, roomy):
+    """g/y/p 会沉到基线以下，底座得单独加宽。"""
+    fit = metrics.fit(metrics_of, "Daisy", roomy)
+    assert fit.status == "wider_base"
+    assert fit.base_width_mm > roomy.base_width_mm
     assert any("下沉字母" in n for n in fit.notes)
 
 
-def test_capped_note_mentions_bold_expansion(metrics_of):
+def test_widen_note_mentions_bold_expansion(metrics_of):
     """加粗把墨迹顶出底座时，文案必须把加粗算进去，不能自相矛盾。"""
     spec = StampSpec(font_size_mm=6.0, weight_offset_mm=0.25)
     spec.base_width_mm = metrics.ink_height_mm(metrics_of, "BELLA", 6.0) + 0.1
     fit = metrics.fit(metrics_of, "BELLA", spec)
-    assert fit.status == "size_capped"
+    assert fit.status == "wider_base"
     note = " ".join(fit.notes)
     assert "加加粗" in note and "共" in note
+
+
+def test_wider_base_label_is_short(metrics_of):
+    spec = StampSpec(font_size_mm=9.0, base_width_mm=6.0)
+    fit = metrics.fit(metrics_of, "BELLA", spec)
+    assert fit.label == "加宽"
+    assert fit.needs_attention
+    assert fit.ok
 
 
 def test_fit_empty_name(metrics_of, spec):

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
@@ -15,6 +16,13 @@ from .fonts import FaceMetrics
 
 ERROR = "error"
 WARN = "warn"
+INFO = "info"
+"""提示级别。
+
+* ``ERROR`` 红：参数自相矛盾，拒绝生成
+* ``WARN`` 橙：会自动处理，但用户最好知道
+* ``INFO`` 灰蓝：已经处理好了，纯告知
+"""
 
 #: 校验「上限是不是定得太小」时用的样本文本：三个最宽的字母。
 #: 连 MMM 都放不下，说明任何 3 字母以上的名字都会被大幅缩字。
@@ -40,6 +48,8 @@ class SpecIssue:
     code: str
     message: str
     fix: dict[str, Any] = field(default_factory=dict)
+    action_label: str = "采用"
+    """按钮文字。个别名字加宽时改成「统一为 7.20mm」，让用户点之前就知道影响全部。"""
 
     @property
     def is_error(self) -> bool:
@@ -90,15 +100,21 @@ def apply_case(names: Iterable[str], mode: str) -> list[str]:
 
 
 def dedupe(names: Iterable[str]) -> tuple[list[str], list[str]]:
-    """拆成 (首次出现的名字, 重复出现的名字)，保持原始顺序。"""
-    seen: set[str] = set()
+    """拆成 (首次出现的名字, 重复出现的名字)，保持原始顺序。
+
+    **按大小写不敏感比较** —— 输出文件是 ``<名字>.stl``，而 Windows / macOS
+    的文件名不区分大小写，``DAISY`` 和 ``Daisy`` 会写进同一个文件，
+    后一个把前一个覆盖掉（清单 8 个、实际只剩 7 个 STL）。
+    """
+    seen: dict[str, str] = {}
     unique: list[str] = []
     duplicates: list[str] = []
     for name in names:
-        if name in seen:
+        key = name.casefold()
+        if key in seen:
             duplicates.append(name)
         else:
-            seen.add(name)
+            seen[key] = name
             unique.append(name)
     return unique, duplicates
 
@@ -111,12 +127,22 @@ def validate_batch(
     """逐个名字给出问题清单。同名多次出现时只保留第一条。"""
     issues: dict[str, list[Issue]] = {}
     seen: dict[str, int] = {}
+    first_seen: dict[str, str] = {}
 
     for name in names:
         found: list[Issue] = []
-        seen[name] = seen.get(name, 0) + 1
-        if seen[name] > 1:
-            found.append(Issue(ERROR, "duplicate", f"与本批次第 {seen[name] - 1} 条重复，已跳过"))
+        key = name.casefold()
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] > 1:
+            previous = first_seen[key]
+            if previous == name:
+                message = f"与本批次第 {seen[key] - 1} 条重复，已跳过"
+            else:
+                # 大小写不同也会写进同一个文件（Windows 不区分），必须算重复
+                message = f"与「{previous}」仅大小写不同，文件名会冲突，已跳过"
+            found.append(Issue(ERROR, "duplicate", message))
+        else:
+            first_seen[key] = name
 
         if not name:
             found.append(Issue(ERROR, "empty", "名字为空"))
@@ -198,27 +224,49 @@ def check_spec(
         )
 
     if metrics is not None:
-        # 3) 墨迹高度超过底座宽度 → 生成时会自动压字号
-        candidates = [n for n in (names or []) if n]
-        if candidates:
-            worst = max(
-                candidates, key=lambda n: m.ink_height_mm(metrics, n, spec.font_size_mm)
-            )
-            ink = m.ink_height_mm(metrics, worst, spec.font_size_mm)
-            total = ink + 2.0 * weight
-            if total > spec.base_width_mm + m.GEOMETRY_TOLERANCE_MM:
-                cap_limit = m.size_cap_from_base(metrics, spec, worst)
-                need = round(total + 0.1, 1)
-                reason = "，含下沉字母" if m.has_descender(metrics, worst) else ""
-                bold = f"，含加粗 {2.0 * weight:.2f}mm 共 {total:.2f}mm" if weight > 0 else ""
+        # 3) 墨迹高度超过底座宽度 —— 只统计真会生成的名字
+        usable = renderable_names(names or [], metrics, spec)
+        need_wider = _names_needing_wider_base(usable, metrics, spec)
+        if need_wider:
+            widest_total, widest_name = need_wider[0]
+            widest = math.ceil((widest_total + 0.05) * 10) / 10
+            count = len(need_wider)
+            if spec.widen_base_per_name:
+                # 已经自动加宽了，这条只是告知，不该让用户觉得要做什么
+                # 只有 1 个名字特殊，不算「全局值设小了」；至少 2 个且过半才算
+                majority = count >= 2 and count * 2 >= len(usable)
+                if majority:
+                    text = (
+                        f"{len(usable)} 个名字里 {count} 个需要更宽的底座"
+                        f"（最大 {widest:.2f}mm），建议整体调大底座宽度"
+                    )
+                    level = WARN
+                else:
+                    text = (
+                        f"{len(usable)} 个名字里 {count} 个需要更宽的底座："
+                        f"{widest_name} → {widest:.2f}mm"
+                        f"（其余用 {spec.base_width_mm:g}mm，字号不变）"
+                    )
+                    level = INFO
+                found.append(
+                    SpecIssue(
+                        level,
+                        "base_widened",
+                        text,
+                        {"base_width_mm": widest},
+                        action_label=f"统一为 {widest:.2f}mm",
+                    )
+                )
+            else:
+                cap_limit = m.size_cap_from_base(metrics, spec, widest_name)
                 found.append(
                     SpecIssue(
                         WARN,
                         "cap_over_base",
-                        f"清单里「{worst}」的墨迹高 {ink:.2f}mm{reason}{bold}，"
-                        f"超过底座宽度 {spec.base_width_mm:g}mm，"
-                        f"会被压到 {cap_limit:.2f}mm。建议底座宽度 ≥ {need:g}mm",
-                        {"base_width_mm": need},
+                        f"{len(usable)} 个名字里 {count} 个装不下（{widest_name} 需要 "
+                        f"{widest:.2f}mm），会缩字号到 {cap_limit:.2f}mm。"
+                        f"建议把底座宽度改为 {widest:.2f}mm",
+                        {"base_width_mm": widest},
                     )
                 )
 
@@ -263,9 +311,51 @@ def check_spec(
             )
         )
 
-    found.sort(key=lambda i: 0 if i.is_error else 1)
+    order = {ERROR: 0, WARN: 1, INFO: 2}
+    found.sort(key=lambda i: order.get(i.level, 3))
     return found
 
 
 def has_blocking_spec_issue(issues: list[SpecIssue]) -> bool:
     return any(i.is_error for i in issues)
+
+
+def renderable_names(
+    names: Iterable[str], fm: FaceMetrics, spec: StampSpec
+) -> list[str]:
+    """只留真会生成的名字。
+
+    参数建议必须建立在这些名字上。清单里常混进中文名、超长名、
+    字体没有字形的名字，它们会被跳过、根本不参与渲染，
+    拿它们算字高只会制造假警报。
+    """
+    usable: list[str] = []
+    for name in names:
+        if not name or len(name) > spec.max_chars:
+            continue
+        if any(ord(ch) < 32 or ord(ch) > 127 for ch in name):
+            continue
+        if fm.missing_chars(name):
+            continue
+        usable.append(name)
+    return usable
+
+
+def _names_needing_wider_base(
+    names: list[str], fm: FaceMetrics, spec: StampSpec
+) -> list[tuple[float, str]]:
+    """装不下当前底座宽度的名字，按需要宽度从大到小排。
+
+    返回 ``[(墨迹高 + 2×加粗, 名字), ...]``。
+    """
+    from . import metrics as m
+
+    weight = max(0.0, spec.weight_offset_mm)
+    limit = spec.base_width_mm + m.GEOMETRY_TOLERANCE_MM
+    result: list[tuple[float, str]] = []
+    for name in names:
+        total = m.ink_height_mm(fm, name, spec.font_size_mm) + 2.0 * weight
+        if total > limit:
+            result.append((total, name))
+    result.sort(reverse=True)
+    return result

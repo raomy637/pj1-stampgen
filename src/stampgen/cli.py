@@ -28,6 +28,8 @@ def _apply_overrides(cfg: AppConfig, args: argparse.Namespace) -> AppConfig:
         cfg.spec.letter_spacing = args.spacing
     if getattr(args, "case", None):
         cfg.spec.case_mode = args.case
+    if getattr(args, "no_widen", False):
+        cfg.spec.widen_base_per_name = False
     if getattr(args, "workers", None) is not None:
         cfg.workers = args.workers
     if getattr(args, "margin", None) is not None:
@@ -122,11 +124,12 @@ def cmd_fit(args: argparse.Namespace) -> int:
         + console.pad("字号", 7, "right")
         + console.pad("间距", 7, "right")
         + console.pad("文字宽", 9, "right")
+        + console.pad("底座宽", 9, "right")
         + console.pad("底座长", 9, "right")
         + "  状态"
     )
     print(header)
-    print("-" * 64)
+    print("-" * 74)
     for name in names:
         fit = metrics.fit(fm, name, spec)
         bad = validate.blocking_issues(issues.get(name, []))
@@ -134,7 +137,7 @@ def cmd_fit(args: argparse.Namespace) -> int:
         line = (
             console.pad(name, 18)
             + f"{fit.size_mm:>7.2f}{fit.spacing:>7.2f}"
-            + f"{fit.width_mm:>9.2f}{fit.base_len_mm:>9.2f}  "
+            + f"{fit.width_mm:>9.2f}{fit.base_width_mm:>9.2f}{fit.base_len_mm:>9.2f}  "
             + console.pad(fit.label, 7)
         )
         print(line + (note if fit.needs_attention or bad else ""))
@@ -213,6 +216,11 @@ def build_parser() -> argparse.ArgumentParser:
             choices=list(CASE_MODES),
             default=None,
             help="大小写：keep 原样 / upper 全大写 / capitalize 首字母大写 / lower 全小写",
+        )
+        p.add_argument(
+            "--no-widen",
+            action="store_true",
+            help="个别名字装不下时缩字号，而不是加宽它的底座",
         )
         p.add_argument(
             "--workers",

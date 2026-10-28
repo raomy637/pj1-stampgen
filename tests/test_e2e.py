@@ -107,6 +107,45 @@ def test_batch_never_exceeds_max_width(tmp_path, face, metrics_of, library):
     assert long_ones, [r.label for r in report.results]
 
 
+def test_batch_widens_base_for_tall_name(tmp_path, face, metrics_of, library):
+    """个别名字装不下时，它的 STL 确实变宽了，而字号没动。"""
+    cfg = AppConfig(font_family=face.family, font_style=face.style)
+    cfg.spec = StampSpec(
+        font_size_mm=SIZE,
+        max_width_mm=MAX_WIDTH,
+        base_width_mm=metrics.ink_height_mm(metrics_of, "TESS", SIZE) + 0.2,
+    )
+    report = batch.run_batch(cfg, ["TESS", "Daisy"], tmp_path / "wide", library=library)
+    assert report.generated == 2, [r.message for r in report.results]
+
+    tess = next(r for r in report.results if r.name == "TESS")
+    daisy = next(r for r in report.results if r.name == "Daisy")
+    assert daisy.size_mm == pytest.approx(tess.size_mm, abs=1e-3)
+    assert daisy.base_width > tess.base_width + 0.5
+
+    stats = openscad.stl_stats(tmp_path / "wide" / "Daisy.stl")
+    assert stats.depth == pytest.approx(daisy.base_width, abs=0.15)
+    plain = openscad.stl_stats(tmp_path / "wide" / "TESS.stl")
+    assert plain.depth == pytest.approx(tess.base_width, abs=0.15)
+
+
+def test_batch_can_shrink_instead_of_widen(tmp_path, face, metrics_of, library):
+    """关掉加宽开关后，底座统一、字号各自缩小。"""
+    cfg = AppConfig(font_family=face.family, font_style=face.style)
+    cfg.spec = StampSpec(
+        font_size_mm=SIZE,
+        max_width_mm=MAX_WIDTH,
+        base_width_mm=metrics.ink_height_mm(metrics_of, "TESS", SIZE) + 0.2,
+        widen_base_per_name=False,
+    )
+    report = batch.run_batch(cfg, ["TESS", "Daisy"], tmp_path / "shrink", library=library)
+    assert report.generated == 2
+    tess = next(r for r in report.results if r.name == "TESS")
+    daisy = next(r for r in report.results if r.name == "Daisy")
+    assert daisy.size_mm < tess.size_mm
+    assert daisy.base_width == pytest.approx(tess.base_width)
+
+
 def test_batch_applies_case_mode(tmp_path, cfg, library):
     cfg.spec.case_mode = "upper"
     report = batch.run_batch(cfg, ["bella", "Ava"], tmp_path / "case", library=library)
