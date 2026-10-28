@@ -42,7 +42,7 @@ ICON = ROOT / "assets" / "stampgen.ico"
 
 APP_NAME = "StampGen"
 CLI_NAME = "stampgen-cli"
-VERSION = (2, 0, 0, 0)
+VERSION = (2, 1, 0, 0)
 VERSION_STR = ".".join(str(x) for x in VERSION[:3])
 
 # 需要随程序分发的只读资源：源目录 -> exe 内目录名
@@ -82,17 +82,38 @@ QUICKSTART = """\
 名字印章生成器 {version}
 ========================================
 
+【两种宽度模式】
+
+  固定字号 → 自适应宽度（默认）
+      你给字号（如 6mm）和字间距，程序算出每个名字各自的底座长度。
+      字一样大，长名字的印章更长。这就是旧版的做法，区别是不再按
+      「字符数 x 6」查表估长度，而是按字体真实字宽精算，误差 0.02mm。
+
+  固定宽度 → 自适应字号
+      你给目标宽度（如 30mm），程序算出每个名字的字号与间距。
+      印章一样宽，短名字的字更小。
+
+  界面上方「宽度模式」两个单选随时切换，选过就记住。
+
 【怎么用】
 
 1. 双击 StampGen.exe 打开界面。
-2. 左侧选字体、调字重、填目标宽度（毫米）。
+2. 选宽度模式，选字体、调字重，填字号（或目标宽度）。
 3. 选名字清单 txt（一行一个名字），或直接拖进来。
 4. 点「开始生成」，STL 会输出到清单同目录的 output_stl<日期> 里。
 
+  预览表会列出每个名字的字号、间距、文字宽、底座长，
+  确认没问题再点开始；有问题的名字会标红或标黄并说明原因。
+
+【同时生成】
+
+「同时生成」留空 = 按 CPU 核数自动决定（封顶 4）。
+名字多的时候能快 3~4 倍，填 1 则退回逐个生成。
+
 【参数会被记住】
 
-目标宽度、留白、字号范围、底座尺寸、字体等，改完停手 1.5 秒就自动存进
-stampgen_config.json（本文件旁边），下次打开自动沿用，不用每次重填。
+宽度模式、字号、目标宽度、留白、底座尺寸、字体等，改完停手 1.5 秒
+就自动存进 stampgen_config.json（本文件旁边），下次打开自动沿用。
 想恢复出厂设置：删掉 stampgen_config.json 即可。
 
 【需要 OpenSCAD】
@@ -108,11 +129,12 @@ stampgen_config.json（本文件旁边），下次打开自动沿用，不用每
 
 【命令行用法】
 
-  stampgen-cli.exe fonts                 列出可用字体
-  stampgen-cli.exe check                 自检 OpenSCAD 与字体解析
-  stampgen-cli.exe fit --names names.txt 只算字号不建模
-  stampgen-cli.exe batch --names names.txt --width 30
-  stampgen-cli.exe fit --width 28 --save 把宽度存为默认值，以后不用再填
+  stampgen-cli.exe fonts                              列出可用字体
+  stampgen-cli.exe check                              自检 OpenSCAD 与字体解析
+  stampgen-cli.exe fit --names names.txt              只算尺寸，不建模
+  stampgen-cli.exe batch --names names.txt --mode auto --size 6
+  stampgen-cli.exe batch --names names.txt --mode fixed --width 30
+  stampgen-cli.exe fit --mode auto --size 6 --save    把这组参数存为默认
 """
 
 
@@ -287,14 +309,23 @@ def report(exes: list[Path], zip_path: Path | None) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global DIST
     parser = argparse.ArgumentParser(description="打包 stampgen 为 Windows exe")
     parser.add_argument("--no-openscad", action="store_true", help="不复制 OpenSCAD 目录")
     parser.add_argument("--no-cli", action="store_true", help="只构建图形界面")
     parser.add_argument("--zip", action="store_true", help="额外生成便携压缩包")
     parser.add_argument(
+        "--dist",
+        default=None,
+        help="输出目录（默认 dist/）。程序正开着占用 exe 时，可以指到别的目录并行构建",
+    )
+    parser.add_argument(
         "--zip-only", action="store_true", help="跳过 PyInstaller，只重新打包便携压缩包"
     )
     args = parser.parse_args(argv)
+
+    if args.dist:
+        DIST = Path(args.dist).resolve()
 
     if args.zip_only:
         exes = [p for p in (DIST / f"{APP_NAME}.exe", DIST / f"{CLI_NAME}.exe") if p.is_file()]

@@ -27,6 +27,13 @@ COLOR_WARN = "#854f0b"
 COLOR_ERR = "#a32d2d"
 COLOR_MUTED = "#5f5e5a"
 
+BUILTIN_TEMPLATE_LABEL = "（内置模板）"
+"""打包运行时内置模板在 %TEMP%\\_MEIxxxxx\\ 里，路径每次启动都变。
+
+界面上直接显示那个临时路径会让人以为要维护它，所以只显示这个占位文案；
+用户真要自定义模板，点「选择文件」指到自己的 .scad 即可。
+"""
+
 
 def _enable_dpi_awareness() -> None:
     """Windows 高分屏下避免界面模糊。"""
@@ -97,9 +104,14 @@ class StampApp:
         self.var_openscad = tk.StringVar(
             value=self.cfg.openscad_path or str(paths.default_openscad())
         )
-        self.var_template = tk.StringVar(
-            value=self.cfg.scad_template or str(paths.scad_template())
-        )
+        if self.cfg.scad_template:
+            tpl_display = self.cfg.scad_template
+        elif paths.is_frozen():
+            # 打包后的内置模板在临时解包目录，显示真实路径只会让人困惑
+            tpl_display = BUILTIN_TEMPLATE_LABEL
+        else:
+            tpl_display = str(paths.scad_template())
+        self.var_template = tk.StringVar(value=tpl_display)
 
     # ---------------- 界面 ----------------
 
@@ -421,9 +433,12 @@ class StampApp:
             "" if not raw_exe or Path(raw_exe) == paths.default_openscad() else raw_exe
         )
         raw_tpl = self.var_template.get().strip()
-        cfg.scad_template = (
-            "" if not raw_tpl or Path(raw_tpl) == paths.scad_template() else raw_tpl
-        )
+        if not raw_tpl or raw_tpl == BUILTIN_TEMPLATE_LABEL:
+            cfg.scad_template = ""
+        elif Path(raw_tpl) == paths.scad_template():
+            cfg.scad_template = ""
+        else:
+            cfg.scad_template = raw_tpl
         return cfg
 
     def _persist(self) -> None:
@@ -509,10 +524,15 @@ class StampApp:
             self.var_openscad.set(path)
 
     def _pick_template(self) -> None:
+        current = self.var_template.get().strip()
+        if not current or current == BUILTIN_TEMPLATE_LABEL:
+            start = str(paths.app_root())
+        else:
+            start = str(Path(current).parent)
         path = filedialog.askopenfilename(
             title="选择 scad 模板",
             filetypes=[("OpenSCAD 模型", "*.scad"), ("所有文件", "*.*")],
-            initialdir=str(Path(self.var_template.get()).parent),
+            initialdir=start,
         )
         if path:
             self.var_template.set(path)
