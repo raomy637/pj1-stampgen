@@ -870,14 +870,13 @@ class StampApp:
         fm = self.library.metrics(face)
         spec = cfg.spec
 
-        spec_issues = validate.check_spec(fm, spec)
-        self._render_hints(spec_issues)
-
         names = self._read_names()
+        unique, duplicates = validate.dedupe(names)
+        # 参数约束要拿清单里的真实名字来算字高，先有名字再校验
+        self._render_hints(validate.check_spec(fm, spec, unique))
         if not names:
             self._set_status("名字清单为空 —— 选择 txt 或直接粘贴")
             return
-        unique, duplicates = validate.dedupe(names)
         name_issues = validate.validate_batch(unique, fm, spec)
 
         ok_count = 0
@@ -947,7 +946,7 @@ class StampApp:
             return
         face = self._current_face()
         if face is not None:
-            spec_issues = validate.check_spec(self.library.metrics(face), cfg.spec)
+            spec_issues = validate.check_spec(self.library.metrics(face), cfg.spec, names)
             errors = [i for i in spec_issues if i.is_error]
             if errors:
                 messagebox.showerror(

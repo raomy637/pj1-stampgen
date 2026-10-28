@@ -139,7 +139,7 @@ def cmd_fit(args: argparse.Namespace) -> int:
         )
         print(line + (note if fit.needs_attention or bad else ""))
 
-    spec_issues = validate.check_spec(fm, spec)
+    spec_issues = validate.check_spec(fm, spec, names)
     if spec_issues:
         print("\n参数检查：")
         for issue in spec_issues:

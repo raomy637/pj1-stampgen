@@ -47,12 +47,20 @@ CURVE_DENSE = (12.0, 2.0)
 #: 轮廓干净、靠贝塞尔曲线描述字形：必须细精度，否则 O/R 会明显多边形化。
 CURVE_CLEAN = (4.0, 0.3)
 
-GEOMETRY_TOLERANCE_MM = 0.05
-"""字高超出底座宽度的容许量。
+GEOMETRY_TOLERANCE_MM = 0.3
+"""墨迹高度超出底座宽度的容许量。
 
-与模板里的 ``overlap = 0.05`` 同量级：一根 0.4mm 喷嘴的八分之一，
-粘得住、看得见，不值得为它把字号压掉 0.04mm 并在每一行标「限字高」。
+圆形字母（O / S / D）按字体设计会比 H 略微高出一点点（overshoot），
+实测本项目七款字体在 6mm 字号下墨迹高 6.01~6.23mm，即最多溢出 0.23mm。
+这是字形设计，不是参数错误，0.15mm 的悬挑打印毫无问题。
+
+留 0.3mm 而不是 0.2mm，是为了让「KHLOE 被压、DAISY 不被压」这种
+差 0.03mm 就一个缩字一个不缩的割裂不出现在同一批里。
+超过 0.3mm 才是真的装不下 —— 例如带 g/y/p 的下沉字母，6mm 字号溢出 2mm。
 """
+
+UPPERCASE_SAMPLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+"""没有具体名字时，用大写字母集合估字体的墨迹高度。"""
 
 STATUS_LABELS = {
     "ok": "正常",
@@ -183,9 +191,35 @@ def predict_width(
     )
 
 
-def cap_height_mm(metrics: FaceMetrics, size_mm: float) -> float:
-    """字号对应的字高（毫米），含 OpenSCAD 的 4/3 放大。"""
-    return metrics.cap_ratio() * size_mm * OPENSCAD_SIZE_SCALE
+def _v_boxes(metrics: FaceMetrics, text: str) -> list[tuple[int, int]]:
+    if not text or not metrics.upem:
+        return []
+    return [metrics.v_bboxes[ord(ch)] for ch in text if ord(ch) in metrics.v_bboxes]
+
+
+def ink_ratio(metrics: FaceMetrics, text: str = "") -> float:
+    """文字墨迹高度相对 em 的比例 —— 判断「字装不装得下」的唯一正确度量。
+
+    文字是垂直居中的，占的是墨迹包围盒（含圆形字母的 overshoot、
+    含 g/y/p 的下沉部分），所以直接量这个高度。
+    传空字符串时用大写字母集合估字体的一般情况。
+    """
+    boxes = _v_boxes(metrics, text) or _v_boxes(metrics, UPPERCASE_SAMPLE)
+    if boxes and metrics.upem:
+        y_min = min(b[0] for b in boxes)
+        y_max = max(b[1] for b in boxes)
+        return (y_max - y_min) / metrics.upem
+    return metrics.cap_ratio()
+
+
+def ink_height_mm(metrics: FaceMetrics, text: str, size_mm: float) -> float:
+    """文字在给定字号下的墨迹高度（毫米）。"""
+    return ink_ratio(metrics, text) * size_mm * INK_SCALE
+
+
+def has_descender(metrics: FaceMetrics, text: str) -> bool:
+    """文字里有没有沉到基线以下的字母（g / y / p / q / j）。"""
+    return any(b[0] < 0 for b in _v_boxes(metrics, text))
 
 
 def text_offset_y(metrics: FaceMetrics, text: str, size_mm: float) -> float:
@@ -200,20 +234,22 @@ def text_offset_y(metrics: FaceMetrics, text: str, size_mm: float) -> float:
     return -metrics.ink_y_center(text) / metrics.upem * size_mm * INK_SCALE
 
 
-def size_cap_from_base(metrics: FaceMetrics, spec: StampSpec) -> float:
+def size_cap_from_base(metrics: FaceMetrics, spec: StampSpec, text: str = "") -> float:
     """由底座宽度反推字号硬上限。
 
-    字高（含加粗外扩 2 × weight）不得超过底座宽度，否则字母会悬在底座外。
+    墨迹高（含加粗外扩 2 × weight）不得超过底座宽度，否则字母会悬在底座外。
     这是**唯一**一条压字号的几何约束 —— 不再额外留 edge 余量，否则
-    「6mm 字号配 6mm 底座」这种一直能打的组合会被莫名其妙压到 5.71mm。
+    「6mm 字号配 6mm 底座」这种一直能打的组合会被莫名其妙压小。
+
+    ``text`` 为空时按该字体的大写字母集合估算。
     """
-    cap_ratio = metrics.cap_ratio()
-    if cap_ratio <= 0:
+    ratio = ink_ratio(metrics, text)
+    if ratio <= 0:
         return float("inf")
     usable = spec.base_width_mm - 2.0 * max(0.0, spec.weight_offset_mm)
     if usable <= 0:
         return 0.0
-    return usable / (cap_ratio * OPENSCAD_SIZE_SCALE)
+    return usable / (ratio * INK_SCALE)
 
 
 def solve_size_for_width(
@@ -329,17 +365,19 @@ def fit(
     size = spec.font_size_mm
     spacing = spacing0
 
-    # ---- 第一步：字高不得超过底座宽 ----
-    cap = cap_height_mm(metrics, size)
-    total = cap + 2.0 * weight
+    # ---- 第一步：墨迹高度不得超过底座宽 ----
+    ink = ink_height_mm(metrics, text, size)
+    total = ink + 2.0 * weight
     if total > spec.base_width_mm + GEOMETRY_TOLERANCE_MM:
-        size = size_cap_from_base(metrics, spec)
+        size = size_cap_from_base(metrics, spec, text)
         status = _worse(status, "size_capped")
         # 加粗会让墨迹上下各外扩 weight，必须一起算，否则文案会自相矛盾
         # （"字高 5.88 超过 6.00" 这种）
-        shape = f"字高 {cap:.2f}mm" + (
+        shape = f"墨迹高 {ink:.2f}mm" + (
             f" 加加粗 {2.0 * weight:.2f}mm 共 {total:.2f}mm" if weight > 0 else ""
         )
+        if has_descender(metrics, text):
+            shape += "（含下沉字母 g/y/p）"
         notes.append(
             f"字号 {spec.font_size_mm:.2f}mm 的{shape}超过底座宽度 "
             f"{spec.base_width_mm:.2f}mm，已压到 {size:.2f}mm；"

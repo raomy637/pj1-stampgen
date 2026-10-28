@@ -26,7 +26,7 @@ def roomy(metrics_of) -> StampSpec:
     """底座宽度够装下 6mm 字号的参数，排除「限字高」干扰。"""
     spec = StampSpec()
     spec.font_size_mm = SIZE
-    spec.base_width_mm = metrics.cap_height_mm(metrics_of, SIZE) + 0.1
+    spec.base_width_mm = metrics.ink_height_mm(metrics_of, "BELLA", SIZE) + 0.1
     return spec
 
 
@@ -73,17 +73,37 @@ def test_probe_scale_recovers_systematic_bias(metrics_of):
 
 def test_size_cap_fills_base_width_exactly(metrics_of, spec):
     cap_limit = metrics.size_cap_from_base(metrics_of, spec)
-    assert metrics.cap_height_mm(metrics_of, cap_limit) == pytest.approx(
-        spec.base_width_mm, rel=1e-6
+    assert metrics.ink_height_mm(metrics_of, metrics.UPPERCASE_SAMPLE, cap_limit) == (
+        pytest.approx(spec.base_width_mm, rel=1e-6)
+    )
+
+
+def test_ink_height_beats_cap_height(metrics_of):
+    """真正决定装不装得下的是墨迹高度，不是「基线到大写字母顶」。
+
+    这些字体是同一套轮廓做了不同幅度的整体上移，cap_height 差很多
+    （0.70~0.85），但同一个名字的墨迹高度完全一样。
+    """
+    ink = metrics.ink_height_mm(metrics_of, "TESS", SIZE)
+    assert 5.9 < ink < 6.3
+    assert metrics.has_descender(metrics_of, "DAISY") is False
+    assert metrics.has_descender(metrics_of, "Daisy") is True
+
+
+def test_descender_makes_text_taller(metrics_of):
+    assert metrics.ink_height_mm(metrics_of, "Daisy", SIZE) > metrics.ink_height_mm(
+        metrics_of, "DAISY", SIZE
     )
 
 
 def test_size_cap_subtracts_bold_expansion(metrics_of):
-    """加粗会让字高多出 2 × weight，上限必须跟着降（v2.1.0 这里漏算过）。"""
+    """加粗会让墨迹上下各外扩 weight，上限必须跟着降（v2.1.0 这里漏算过）。"""
     plain = metrics.size_cap_from_base(metrics_of, StampSpec(weight_offset_mm=0.0))
     bold = metrics.size_cap_from_base(metrics_of, StampSpec(weight_offset_mm=0.2))
     assert bold < plain
-    assert metrics.cap_height_mm(metrics_of, bold) + 0.4 == pytest.approx(6.0, rel=1e-6)
+    assert metrics.ink_height_mm(
+        metrics_of, metrics.UPPERCASE_SAMPLE, bold
+    ) + 0.4 == pytest.approx(6.0, rel=1e-6)
 
 
 def test_base_len_inverts_max_text_width(spec):
@@ -167,13 +187,14 @@ def test_fit_caps_size_when_base_too_narrow(metrics_of):
 def test_fit_capped_size_fits_base_width(metrics_of):
     spec = StampSpec(font_size_mm=9.0, base_width_mm=6.0)
     fit = metrics.fit(metrics_of, "BELLA", spec)
-    assert metrics.cap_height_mm(metrics_of, fit.size_mm) <= spec.base_width_mm + 1e-9
+    ink = metrics.ink_height_mm(metrics_of, "BELLA", fit.size_mm)
+    assert ink <= spec.base_width_mm + metrics.GEOMETRY_TOLERANCE_MM + 1e-9
 
 
-def test_fit_ignores_hairline_overhang(metrics_of):
-    """0.05mm 以内的溢出是打印容差，不该为此把字号压掉一截。"""
+def test_fit_ignores_overshoot_within_tolerance(metrics_of):
+    """圆形字母的 overshoot 是字形设计，容差以内不该压字号。"""
     spec = StampSpec(font_size_mm=6.0)
-    spec.base_width_mm = metrics.cap_height_mm(metrics_of, 6.0) - 0.03
+    spec.base_width_mm = metrics.ink_height_mm(metrics_of, "BELLA", 6.0) - 0.1
     fit = metrics.fit(metrics_of, "BELLA", spec)
     assert fit.status == "ok"
     assert fit.size_mm == pytest.approx(6.0)
@@ -181,14 +202,21 @@ def test_fit_ignores_hairline_overhang(metrics_of):
 
 def test_fit_caps_when_overhang_exceeds_tolerance(metrics_of):
     spec = StampSpec(font_size_mm=6.0)
-    spec.base_width_mm = metrics.cap_height_mm(metrics_of, 6.0) - 0.2
+    spec.base_width_mm = metrics.ink_height_mm(metrics_of, "BELLA", 6.0) - 0.4
     assert metrics.fit(metrics_of, "BELLA", spec).status == "size_capped"
 
 
+def test_fit_caps_lowercase_with_descender(metrics_of, roomy):
+    """g/y/p 会沉到基线以下，同样的底座宽度就装不下了。"""
+    fit = metrics.fit(metrics_of, "Daisy", roomy)
+    assert fit.status == "size_capped"
+    assert any("下沉字母" in n for n in fit.notes)
+
+
 def test_capped_note_mentions_bold_expansion(metrics_of):
-    """加粗把字高顶出底座时，文案必须把加粗算进去，不能自相矛盾。"""
+    """加粗把墨迹顶出底座时，文案必须把加粗算进去，不能自相矛盾。"""
     spec = StampSpec(font_size_mm=6.0, weight_offset_mm=0.25)
-    spec.base_width_mm = metrics.cap_height_mm(metrics_of, 6.0) + 0.2
+    spec.base_width_mm = metrics.ink_height_mm(metrics_of, "BELLA", 6.0) + 0.1
     fit = metrics.fit(metrics_of, "BELLA", spec)
     assert fit.status == "size_capped"
     note = " ".join(fit.notes)

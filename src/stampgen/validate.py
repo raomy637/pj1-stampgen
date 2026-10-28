@@ -155,11 +155,17 @@ def format_issues(issues: list[Issue]) -> str:
 # ---------------------------------------------------------------- 参数约束
 
 
-def check_spec(metrics: FaceMetrics | None, spec: StampSpec) -> list[SpecIssue]:
+def check_spec(
+    metrics: FaceMetrics | None, spec: StampSpec, names: Iterable[str] | None = None
+) -> list[SpecIssue]:
     """检查参数之间的逻辑约束，按严重程度排序（错误在前）。
 
     这些约束不是拍脑袋定的，都能算出具体数字，所以每条都带上建议值，
     界面可以直接给一个「采用」按钮。
+
+    「墨迹高度装不下底座」这条必须拿**具体名字**来算 —— 字有多高取决于
+    名字里有哪些字母（g/y/p 有下沉、Q 的尾巴到基线、V 比 W 高一截），
+    用一个固定样本估只会误报。所以 ``names`` 为空时跳过这条。
     """
     from . import metrics as m
 
@@ -192,22 +198,29 @@ def check_spec(metrics: FaceMetrics | None, spec: StampSpec) -> list[SpecIssue]:
         )
 
     if metrics is not None:
-        # 3) 字高超过底座宽度 → 生成时会自动压字号
-        cap = m.cap_height_mm(metrics, spec.font_size_mm)
-        if cap + 2.0 * weight > spec.base_width_mm + m.GEOMETRY_TOLERANCE_MM:
-            cap_limit = m.size_cap_from_base(metrics, spec)
-            need = round(cap + 2.0 * weight + 0.1, 1)
-            found.append(
-                SpecIssue(
-                    WARN,
-                    "cap_over_base",
-                    f"当前字体 {spec.font_size_mm:g}mm 字号字高 {cap:.2f}mm"
-                    f"（含加粗 {2.0 * weight:.2f}mm）超过底座宽度 "
-                    f"{spec.base_width_mm:g}mm，会自动压到 {cap_limit:.2f}mm。"
-                    f"建议底座宽度 ≥ {need:g}mm",
-                    {"base_width_mm": need},
-                )
+        # 3) 墨迹高度超过底座宽度 → 生成时会自动压字号
+        candidates = [n for n in (names or []) if n]
+        if candidates:
+            worst = max(
+                candidates, key=lambda n: m.ink_height_mm(metrics, n, spec.font_size_mm)
             )
+            ink = m.ink_height_mm(metrics, worst, spec.font_size_mm)
+            total = ink + 2.0 * weight
+            if total > spec.base_width_mm + m.GEOMETRY_TOLERANCE_MM:
+                cap_limit = m.size_cap_from_base(metrics, spec, worst)
+                need = round(total + 0.1, 1)
+                reason = "，含下沉字母" if m.has_descender(metrics, worst) else ""
+                bold = f"，含加粗 {2.0 * weight:.2f}mm 共 {total:.2f}mm" if weight > 0 else ""
+                found.append(
+                    SpecIssue(
+                        WARN,
+                        "cap_over_base",
+                        f"清单里「{worst}」的墨迹高 {ink:.2f}mm{reason}{bold}，"
+                        f"超过底座宽度 {spec.base_width_mm:g}mm，"
+                        f"会被压到 {cap_limit:.2f}mm。建议底座宽度 ≥ {need:g}mm",
+                        {"base_width_mm": need},
+                    )
+                )
 
         # 4) 上限定得太小 → 会大量缩字
         sample = m.predict_width(metrics, SAMPLE_TEXT, spec.font_size_mm, spec.letter_spacing, weight)

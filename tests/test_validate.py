@@ -98,18 +98,17 @@ def _codes(issues):
 
 
 def test_check_spec_clean_defaults(metrics_of):
-    """默认参数本身自洽：底座宽度按该字体的实际字高给足。"""
+    """默认参数本身自洽：底座宽度按该字体的实际墨迹高度给足。"""
     spec = StampSpec()
-    spec.base_width_mm = metrics.cap_height_mm(metrics_of, spec.font_size_mm) + 0.2
-    assert validate.check_spec(metrics_of, spec) == []
+    spec.base_width_mm = metrics.ink_height_mm(metrics_of, "TESS", spec.font_size_mm) + 0.2
+    assert validate.check_spec(metrics_of, spec, ["TESS"]) == []
 
 
-def test_check_spec_flags_default_6mm_base_for_tall_font(metrics_of):
-    """字高比 0.803 的字体，6mm 字号字高 6.43mm，6mm 底座确实装不下。"""
+def test_check_spec_clean_at_default_6mm(metrics_of):
+    """默认的 6mm 字号配 6mm 底座是能打的，不该报警。"""
     spec = StampSpec(font_size_mm=6.0, base_width_mm=6.0)
-    if metrics.cap_height_mm(metrics_of, 6.0) <= 6.0:
-        pytest.skip("该字体 6mm 字号字高不超过 6mm")
-    assert "cap_over_base" in _codes(validate.check_spec(metrics_of, spec))
+    issues = validate.check_spec(metrics_of, spec, ["TESS", "DAISY", "WALKER"])
+    assert "cap_over_base" not in _codes(issues)
 
 
 def test_check_spec_margin_eats_all_width(metrics_of):
@@ -129,20 +128,35 @@ def test_check_spec_weight_over_limit(metrics_of):
 
 
 def test_check_spec_cap_over_base_width(metrics_of):
-    """6mm 字号字高 6.43mm，6mm 底座装不下 —— 必须提示并给出建议底座宽度。"""
-    spec = StampSpec(font_size_mm=6.0, base_width_mm=6.0)
-    issues = validate.check_spec(metrics_of, spec)
+    """底座比墨迹还窄 —— 必须提示并给出建议底座宽度，且点名是哪个名字。"""
+    spec = StampSpec(font_size_mm=6.0)
+    spec.base_width_mm = metrics.ink_height_mm(metrics_of, "BELLA", 6.0) - 0.6
+    issues = validate.check_spec(metrics_of, spec, ["BELLA"])
     issue = next(i for i in issues if i.code == "cap_over_base")
     assert not issue.is_error
-    cap = metrics.cap_height_mm(metrics_of, 6.0)
-    if cap > 6.0:
-        assert issue.fix["base_width_mm"] > 6.0
-        assert f"{cap:.2f}" in issue.message
+    assert "BELLA" in issue.message
+    assert issue.fix["base_width_mm"] > spec.base_width_mm
 
 
 def test_check_spec_no_cap_warning_when_base_is_wide(metrics_of):
-    spec = StampSpec(font_size_mm=6.0, base_width_mm=metrics.cap_height_mm(metrics_of, 6.0) + 0.2)
+    spec = StampSpec(font_size_mm=6.0)
+    spec.base_width_mm = metrics.ink_height_mm(metrics_of, "BELLA", 6.0) + 0.3
+    assert "cap_over_base" not in _codes(validate.check_spec(metrics_of, spec, ["BELLA"]))
+
+
+def test_check_spec_skips_cap_check_without_names(metrics_of):
+    """没有具体名字就不猜字高 —— 用固定样本估只会误报。"""
+    spec = StampSpec(font_size_mm=6.0, base_width_mm=4.0)
     assert "cap_over_base" not in _codes(validate.check_spec(metrics_of, spec))
+
+
+def test_check_spec_flags_descender_name(metrics_of):
+    spec = StampSpec(font_size_mm=6.0)
+    spec.base_width_mm = metrics.ink_height_mm(metrics_of, "DAISY", 6.0) + 0.05
+    issues = validate.check_spec(metrics_of, spec, ["DAISY", "Daisy"])
+    issue = next(i for i in issues if i.code == "cap_over_base")
+    assert "Daisy" in issue.message
+    assert "下沉字母" in issue.message
 
 
 def test_check_spec_max_width_too_small(metrics_of):

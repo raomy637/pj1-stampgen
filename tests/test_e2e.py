@@ -25,8 +25,8 @@ def cfg(face, metrics_of) -> AppConfig:
     cfg.spec = StampSpec(
         font_size_mm=SIZE,
         max_width_mm=MAX_WIDTH,
-        # 底座宽度按该字体实际字高给，避免"限字高"掩盖了限宽逻辑
-        base_width_mm=metrics.cap_height_mm(metrics_of, SIZE) + 0.1,
+        # 底座宽度按该字体实际墨迹高度给，避免"限字高"掩盖了限宽逻辑
+        base_width_mm=metrics.ink_height_mm(metrics_of, "BELLA", SIZE) + 0.2,
     )
     return cfg
 
@@ -90,7 +90,7 @@ def test_batch_never_exceeds_max_width(tmp_path, face, metrics_of, library):
     cfg.spec = StampSpec(
         font_size_mm=SIZE,
         max_width_mm=30.0,
-        base_width_mm=metrics.cap_height_mm(metrics_of, SIZE) + 0.1,
+        base_width_mm=metrics.ink_height_mm(metrics_of, "BELLA", SIZE) + 0.2,
     )
     report = batch.run_batch(cfg, ["AVA", "BELLA", "GRACIE"], tmp_path / "lim", library=library)
     assert report.generated >= 2, [r.message for r in report.results]
