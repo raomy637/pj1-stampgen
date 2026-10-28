@@ -1,0 +1,45 @@
+# ============================================
+# 目录约定：代码在 src/ legacy/ tests/ tools/，
+# 业务数据在 data/，构建产物在 build/ dist/。
+# 下面排除的都是「体积大」或「每台机器不同」的东西。
+# ============================================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- 虚拟环境（只用 .venv313） ---
+.venv/
+.venv313/
+venv/
+
+# --- 构建产物与中间文件 ---
+build/
+dist/
+*.spec.bak
+*.log
+stampgen_crash.log
+PJ1Program_crash.log
+
+# --- 运行时生成的配置（含本机绝对路径，每台机器不同） ---
+stampgen_config.json
+legacy/all_in_one_config.json
+
+# --- 业务数据：名字清单与 STL 产出（约 400MB） ---
+data/
+*.stl
+*.3mf
+
+# --- 第三方运行时（OpenSCAD 约 48MB，各自本地准备） ---
+OpenSCAD/
+
+# --- 缓存 ---
+.cache/
+.fontcache_test/
+
+# --- 系统与 IDE ---
+Thumbs.db
+desktop.ini
+.idea/

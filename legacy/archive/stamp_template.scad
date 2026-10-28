@@ -1,0 +1,32 @@
+// ===== 参数设置 =====
+name          = "BELLA";   // 默认印章文字（会被命令行覆盖）
+base_len      = 36;        // 底座长度，会被 -D base_len=xx 覆盖
+base_width    = 6;         // 底座宽度 (Y)
+base_height   = 10;        // 底座高度 (Z)
+
+letter_size   = 6;         // 字体高度 (size)
+letter_height = 6;         // 文字挤出高度
+font_name     = "Arial";   // 字体
+
+$fn = 64;                  // 圆弧精细度（可选）
+
+// ===== 主体模块 =====
+module stamp_body() {
+    union() {
+        // 底座：居中放置
+        cube([base_len, base_width, base_height], center = true);
+
+        // 文字：放在底座顶面，向上拉伸
+        translate([0, 0, base_height/2])
+            linear_extrude(height = letter_height)
+                text(name,
+                     size   = letter_size,
+                     font   = font_name,
+                     halign = "center",
+                     valign = "center");
+    }
+}
+
+// ===== 镜像整个印章（压印后文字为正） =====
+mirror([1, 0, 0])   // 沿 YZ 平面左右翻转
+    stamp_body();
