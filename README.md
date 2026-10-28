@@ -25,8 +25,22 @@ run.bat
 图形界面操作顺序：填印章几何 → 选字体/字号/加粗/大小写（预览条即时可见）→
 选名字 txt 或直接粘贴 → 选输出目录 → 开始生成。
 参数一改结果表就自动刷新，没有「预览」按钮要点。
-输出目录规则沿用历史约定：`names1026.txt` → `<输出目录>\output_stl1026\`；
+输出目录规则：`names1026.txt` → `<输出目录>\output_stl1026\`，
 直接粘贴的名字（没有 txt）→ `<输出目录>\output_stl\`。
+**每次点「开始生成」会在里面新建一个带时间戳的子文件夹**，一天做几批都不会互相覆盖：
+
+```
+<输出目录>\output_stl1026\
+  20261029_2359\        ← 第一批
+    Amanda.stl
+    MIKE.stl
+    json\manifest.json
+  20261030_0915\        ← 第二批，互不影响
+    Daisy.stl
+    json\manifest.json
+```
+
+模型文件在批次目录顶层，json 记录收在 `json\` 子文件夹里。
 生成完会自动打开输出文件夹（可在配置区取消勾选）。
 
 ## 限宽：字号固定，底座按名字伸缩
@@ -168,7 +182,8 @@ python -m stampgen check
 python -m stampgen fit --names names\names1026.txt --size 6 --max-width 60
 
 :: 批量生成
-python -m stampgen batch --names names\names1026.txt --out output_stl --size 6 --font Daziji_V5
+python -m stampgen batch --names names\names1026.txt --size 6 --font Daziji_V5
+:: 输出到 <names 同目录>\output_stl1026\<时间戳>\；--outdir 可指定固定目录（不再加时间戳）
 
 :: 打开图形界面
 python -m stampgen gui
@@ -266,8 +281,8 @@ PJ1/
 └── run-legacy-py.bat       # 旧版源码方式
 ```
 
-每个输出目录里会写一份 `manifest.json`，记录当次字体、全部参数、
-每个名字的字号/间距/实测宽度，便于事后追溯。
+每个批次目录的 `json\manifest.json` 记录当次字体、全部参数、
+每个名字的字号/间距/底座宽度/实测宽度，便于事后追溯。
 
 `build/trash/` 是重构与打包时的归档区：历史版本按日期存放，随时可以整个
 删掉 `build/` 回收空间。
@@ -294,7 +309,7 @@ PJ1/
 | 选择 scad 模板 | ✅ 保留 |
 | 配置持久化 | ✅ 增强：参数改完 1.5 秒自动存，不用等关窗 |
 | 日志框 / 后台线程 | ✅ 保留 |
-| 输出目录 `output_stl####` | ✅ 保留 |
+| 输出目录 `output_stl####` | ✅ 保留，并在其下按时间戳分批，同名不再覆盖 |
 | 手填字间距 spacing | ✅ 保留 |
 | 字符数 → 底座长度映射表 | ✅ 升级：按字体度量精算宽度，不再按字符数粗估 |
 | 固定总宽、字号自适应 | ➖ 已去掉：用「最长不超过」代替，短名字不再硬撑到统一宽度 |

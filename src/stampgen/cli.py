@@ -165,7 +165,11 @@ def cmd_batch(args: argparse.Namespace) -> int:
         return 2
 
     out_root = Path(args.out or names_path.parent)
-    output_dir = Path(args.outdir) if args.outdir else batch.derive_output_dir(names_path, out_root)
+    if args.outdir:
+        # 明确指定了目录就直接用，脚本需要精确控制路径
+        output_dir = Path(args.outdir)
+    else:
+        output_dir = batch.batch_dir(batch.derive_output_dir(names_path, out_root))
     lib = FontLibrary(args.fonts_dir)
 
     try:
@@ -257,7 +261,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(p_batch)
     p_batch.add_argument("--names", required=True, help="名字清单 txt")
     p_batch.add_argument("--out", default=None, help="输出根目录（默认与 names 同目录）")
-    p_batch.add_argument("--outdir", default=None, help="直接指定输出目录，覆盖自动命名")
+    p_batch.add_argument(
+        "--outdir",
+        default=None,
+        help="直接指定输出目录（不再加时间戳子目录）；默认是 <out>/output_stl<日期>/<时间戳>/",
+    )
     p_batch.set_defaults(func=cmd_batch)
 
     p_gui = sub.add_parser("gui", help="打开图形界面（默认）")

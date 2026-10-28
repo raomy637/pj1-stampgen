@@ -63,8 +63,10 @@ def test_batch_generates_and_writes_manifest(tmp_path, cfg, library, openscad_ex
     assert report.failed == 0
     for name in names:
         assert (tmp_path / "out" / f"{name}.stl").is_file()
-    manifest = tmp_path / "out" / "manifest.json"
+    manifest = tmp_path / "out" / "json" / "manifest.json"
     assert manifest.is_file()
+    # 模型文件必须在批次目录顶层，json 收在 json/ 里
+    assert not (tmp_path / "out" / "manifest.json").exists()
 
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert payload["summary"]["generated"] == 2
@@ -170,6 +172,28 @@ def test_batch_respects_cancel(tmp_path, cfg, library):
         cfg, ["BELLA", "AVA"], tmp_path / "out4", library=library, cancel=cancel
     )
     assert report.generated == 0
+
+
+def test_batch_dir_uses_timestamp(tmp_path):
+    from datetime import datetime
+
+    base = tmp_path / "output_stl"
+    target = batch.batch_dir(base, datetime(2026, 10, 29, 23, 59))
+    assert target == base / "20261029_2359"
+
+
+def test_batch_dir_avoids_collision(tmp_path):
+    """同一分钟内连点两次生成，第二个自动加 _2，不会互相覆盖。"""
+    from datetime import datetime
+
+    base = tmp_path / "output_stl"
+    when = datetime(2026, 10, 29, 23, 59)
+    first = batch.batch_dir(base, when)
+    first.mkdir(parents=True)
+    second = batch.batch_dir(base, when)
+    assert second == base / "20261029_2359_2"
+    second.mkdir()
+    assert batch.batch_dir(base, when) == base / "20261029_2359_3"
 
 
 def test_derive_output_dir():

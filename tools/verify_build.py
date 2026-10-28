@@ -154,10 +154,13 @@ def step_batch() -> None:
     except subprocess.TimeoutExpired:
         check(False, "批量生成 STL", "超时（>900s）")
         return
-    outdir = tmp / "output_stl"
+    base = tmp / "output_stl"
+    # 每批一个时间戳子目录，取最新的那个
+    batches = sorted(p for p in base.glob("*") if p.is_dir()) if base.is_dir() else []
+    outdir = batches[-1] if batches else base
     stls = sorted(outdir.glob("*.stl")) if outdir.is_dir() else []
-    manifest = outdir / "manifest.json" if outdir.is_dir() else None
-    ok = cp.returncode == 0 and len(stls) == 2 and manifest is not None and manifest.is_file()
+    manifest = outdir / "json" / "manifest.json"
+    ok = cp.returncode == 0 and len(stls) == 2 and manifest.is_file()
     detail = f"{len(stls)} 个 STL，耗时 {time.time() - started:.0f}s"
     check(ok, "批量生成 STL", detail)
     print("\n".join("      " + ln for ln in cp.stdout.strip().splitlines()[-6:]), flush=True)
@@ -207,9 +210,20 @@ def step_icon() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="验证 dist 下的打包产物")
+    global DIST, GUI_EXE, CLI_EXE
+    parser = argparse.ArgumentParser(description="验证打包产物")
     parser.add_argument("--skip-batch", action="store_true", help="跳过耗时的端到端生成")
+    parser.add_argument(
+        "--dist",
+        default=None,
+        help="要验证的目录（默认 dist/）。dist/ 里的 exe 正被占用时可指到 dist/v2.2.x/",
+    )
     args = parser.parse_args(argv)
+
+    if args.dist:
+        DIST = Path(args.dist).resolve()
+        GUI_EXE = DIST / "StampGen.exe"
+        CLI_EXE = DIST / "stampgen-cli.exe"
 
     print(f"验证目录：{DIST}\n", flush=True)
     step_files()

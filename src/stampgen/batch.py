@@ -115,6 +115,24 @@ def derive_output_dir(names_txt: Path | str, root: Path | str) -> Path:
     return Path(root) / f"output_stl{suffix}"
 
 
+def batch_dir(base_dir: Path | str, when: datetime | None = None) -> Path:
+    """在 ``base_dir`` 下算出一个带时间戳的批次目录（只算路径，不创建）。
+
+    一天内做多批时，每批单独一个文件夹，同名 STL 永远不会互相覆盖。
+    同一分钟内连点两次生成会撞名，自动加 ``_2`` / ``_3`` 后缀。
+
+    形如 ``<输出目录>/output_stl/20261029_2359/``。
+    """
+    base_dir = Path(base_dir)
+    stamp = (when or datetime.now()).strftime("%Y%m%d_%H%M")
+    candidate = base_dir / stamp
+    index = 2
+    while candidate.exists():
+        candidate = base_dir / f"{stamp}_{index}"
+        index += 1
+    return candidate
+
+
 def _noop(*_args, **_kwargs) -> None:
     return None
 
@@ -412,7 +430,8 @@ def run_batch(
 
 
 def _write_manifest(cfg: AppConfig, face: FontFace, report: BatchReport) -> Path:
-    path = report.output_dir / "manifest.json"
+    # 模型文件留在批次目录顶层，json 单独收进 json/，用户翻文件夹时只看到 STL
+    path = report.output_dir / "json" / "manifest.json"
     payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "font": {
@@ -432,5 +451,6 @@ def _write_manifest(cfg: AppConfig, face: FontFace, report: BatchReport) -> Path
         },
         "items": [asdict(r) for r in report.results],
     }
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path

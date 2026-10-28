@@ -666,8 +666,9 @@ class StampApp:
         if not root:
             self.var_out_hint.set("实际输出：请先选择输出目录")
             return
-        target = batch_mod.derive_output_dir(self._names_source_txt or "names", root)
-        self.var_out_hint.set(f"实际输出：{target}")
+        # 显示下一次生成会落到的具体批次目录（时间戳按当前分钟算）
+        base = batch_mod.derive_output_dir(self._names_source_txt or "names", root)
+        self.var_out_hint.set(f"实际输出：{batch_mod.batch_dir(base)}")
 
     # ---------------- 日志与状态 ----------------
 
@@ -1065,9 +1066,11 @@ class StampApp:
         self.btn_start.configure(state="disabled")
         self.btn_cancel.configure(state="normal")
         self.progress["value"] = 0
-        output_dir = self._resolve_output_dir(cfg)
+        # 每批一个时间戳子目录：一天做几次都不会互相覆盖
+        output_dir = batch_mod.batch_dir(self._resolve_output_dir(cfg))
         self.log("")
-        self.log(f"开始生成，共 {len(names)} 个名字 → {output_dir}")
+        self.log(f"开始生成，共 {len(names)} 个名字")
+        self.log(f"输出到：{output_dir}")
 
         self.worker = threading.Thread(
             target=self._run_batch, args=(cfg, names, output_dir), daemon=True
