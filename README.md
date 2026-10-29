@@ -148,6 +148,23 @@ stampgen-cli.exe fit --size 6 --max-width 28 --save
 
 把 `.ttf` / `.otf` 放进 `fonts/` 即可，程序启动时自动扫描。
 
+### 内置字体
+
+| 字体 | 字重 | 类型 | 6mm 字号字高 | 许可 |
+|---|---|---|---|---|
+| `Daziji_V1` ~ `V5` | Regular | 等宽（改造版） | 5.9~6.9mm | 随 Special Elite（Apache 2.0） |
+| `Special Elite` | Regular | 等宽 | 5.6mm | Apache 2.0 |
+| `Special Elite Mono Final` | Regular | 等宽 | 6.1mm | Apache 2.0 |
+| **`ELEGANT TYPEWRITER`** | **Regular / Bold / Light / Italic** | **比例** | **5.3mm** | **⚠️ 仅限非商业使用** |
+
+> **`ELEGANT TYPEWRITER` 的许可限制**：作者 Lukas Krakora 声明
+> "free for **non-commercial** use only"。商业用途（例如批量制作并销售印章）
+> 需要先联系 `krraaa@yahoo.com` 购买商业授权。
+> 许可证原文见 `fonts/ELEGANT_TYPEWRITER_LICENSE.txt`。
+
+它是**比例字体**（每个字母占位不同），原始字距已经由设计师调过，
+间隙极差只有 0.17~0.69mm（`Daziji` 系列是 1.27mm），所以视觉上更均匀。
+
 ### 字符等距
 
 内置字体都是「等宽」的（每个字母占位一样），但**占位相同不等于视觉间距相同**：
