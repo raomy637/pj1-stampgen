@@ -26,6 +26,7 @@ class RenderParams:
     weight_offset: float
     outline_fix: float
     text_offset_y: float
+    letter_x: list[float]
     curve_fa: float
     curve_fs: float
 
@@ -40,6 +41,7 @@ class RenderParams:
         base_len: float | None = None,
         curve: tuple[float, float] | None = None,
         outline_fix: float = 0.0,
+        letter_x: list[float] | None = None,
     ) -> "RenderParams":
         offset_y = 0.0
         if metrics is not None:
@@ -63,6 +65,7 @@ class RenderParams:
             weight_offset=round(spec.weight_offset_mm, 4),
             outline_fix=round(outline_fix, 4),
             text_offset_y=round(offset_y, 4),
+            letter_x=[round(v, 4) for v in (letter_x or fit.letter_x)],
             curve_fa=round(fa, 3),
             curve_fs=round(fs, 3),
         )
@@ -71,6 +74,8 @@ class RenderParams:
 def _fmt(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_fmt(v) for v in value) + "]"
     if isinstance(value, str):
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
@@ -96,6 +101,7 @@ def to_defines(params: RenderParams) -> list[str]:
         ("weight_offset", params.weight_offset),
         ("outline_fix", params.outline_fix),
         ("text_offset_y", params.text_offset_y),
+        ("letter_x", params.letter_x),
         ("curve_fa", params.curve_fa),
         ("curve_fs", params.curve_fs),
     ]
@@ -122,6 +128,7 @@ def preview_scad(params: RenderParams, template: Path) -> str:
             ("weight_offset", params.weight_offset),
             ("outline_fix", params.outline_fix),
             ("text_offset_y", params.text_offset_y),
+            ("letter_x", params.letter_x),
             ("curve_fa", params.curve_fa),
             ("curve_fs", params.curve_fs),
         ]

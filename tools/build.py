@@ -42,7 +42,7 @@ ICON = ROOT / "assets" / "stampgen.ico"
 
 APP_NAME = "StampGen"
 CLI_NAME = "stampgen-cli"
-VERSION = (2, 2, 4, 0)
+VERSION = (2, 2, 5, 0)
 VERSION_STR = ".".join(str(x) for x in VERSION[:3])
 
 # 需要随程序分发的只读资源：源目录 -> exe 内目录名

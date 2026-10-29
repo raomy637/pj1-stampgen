@@ -23,6 +23,10 @@ weight_offset  = is_undef(weight_offset)  ? 0         : weight_offset;
 // offset(r=0.001) 会重建多边形，0.001mm 的尺寸影响可以忽略。
 outline_fix    = is_undef(outline_fix)    ? 0         : outline_fix;
 text_offset_y  = is_undef(text_offset_y)  ? 0         : text_offset_y;
+// letter_x 非空时逐字定位（视觉等距）：等宽字体的「占位」相同，但「墨迹间隙」
+// 不同（M 几乎占满格子、A 偏左），拼起来疏密不匀。逐字定位把间隙重新平均分配，
+// 总宽不变，只是每个字母的落点由 letter_x 决定。
+letter_x       = is_undef(letter_x)       ? []        : letter_x;
 curve_fa       = is_undef(curve_fa)       ? 4         : curve_fa;
 curve_fs       = is_undef(curve_fs)       ? 0.4       : curve_fs;
 
@@ -35,13 +39,24 @@ module glyphs_2d() {
     // valign="baseline" 让文字基线落在 y=0，
     // 再由 text_offset_y 把「大写字高带」的中心移到原点，
     // 这样换任何字体都能保持光学居中。
-    translate([0, text_offset_y, 0])
-        text(name,
-             size    = letter_size,
-             font    = str(font_family, ":style=", font_style),
-             spacing = letter_spacing,
-             halign  = "center",
-             valign  = "baseline");
+    if (len(letter_x) > 0 && len(letter_x) == len(name)) {
+        // 视觉等距：每个字母按 letter_x 落位，间隙由 Python 端平均分配
+        for (i = [0 : len(name) - 1])
+            translate([letter_x[i], text_offset_y, 0])
+                text(name[i],
+                     size   = letter_size,
+                     font   = str(font_family, ":style=", font_style),
+                     halign = "left",
+                     valign = "baseline");
+    } else {
+        translate([0, text_offset_y, 0])
+            text(name,
+                 size    = letter_size,
+                 font    = str(font_family, ":style=", font_style),
+                 spacing = letter_spacing,
+                 halign  = "center",
+                 valign  = "baseline");
+    }
 }
 
 module glyphs_fixed_2d() {

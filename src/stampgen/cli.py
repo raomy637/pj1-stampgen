@@ -30,6 +30,8 @@ def _apply_overrides(cfg: AppConfig, args: argparse.Namespace) -> AppConfig:
         cfg.spec.case_mode = args.case
     if getattr(args, "no_widen", False):
         cfg.spec.widen_base_per_name = False
+    if getattr(args, "no_even_spacing", False):
+        cfg.spec.even_spacing = False
     if getattr(args, "workers", None) is not None:
         cfg.workers = args.workers
     if getattr(args, "margin", None) is not None:
@@ -225,6 +227,11 @@ def build_parser() -> argparse.ArgumentParser:
             "--no-widen",
             action="store_true",
             help="个别名字装不下时缩字号，而不是加宽它的底座",
+        )
+        p.add_argument(
+            "--no-even-spacing",
+            action="store_true",
+            help="按字体原本字距排布，不做视觉等距（默认是等距）",
         )
         p.add_argument(
             "--workers",

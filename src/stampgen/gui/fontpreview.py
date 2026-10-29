@@ -10,6 +10,8 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+from ..metrics import OPENSCAD_SIZE_SCALE
+
 PREVIEW_SAMPLES = {
     "keep": "ABCDE abcde 0123",
     "upper": "ABCDE ABCDE 0123",
@@ -39,8 +41,9 @@ def render_preview(
     text: str,
     size_mm: float,
     weight_mm: float = 0.0,
+    letter_x: list[float] | None = None,
     max_px: int = 900,
-    max_height_px: int = 74,
+    max_height_px: int = 82,
     fg: str = "#1a1a18",
     bg: str = "#fbfbf9",
 ):
@@ -56,7 +59,9 @@ def render_preview(
     weight_mm = max(0.0, float(weight_mm))
 
     for scale in SCALE_CANDIDATES:
-        px = max(6, int(round(size_mm * scale)))
+        # OpenSCAD 的 size 不是毫米：size=6 的实际 em 是 8mm（96dpi/72pt）。
+        # 这里必须乘 4/3，否则预览里的字比实际小 25%。
+        px = max(6, int(round(size_mm * OPENSCAD_SIZE_SCALE * scale)))
         try:
             font = ImageFont.truetype(str(font_path), px)
         except Exception:
@@ -66,8 +71,8 @@ def render_preview(
         # Pillow 的 stroke_width 支持浮点并做抗锯齿，改动 0.02mm 也看得出来。
         stroke = max(0.0, weight_mm * scale)
         try:
-            box = font.getbbox(text, stroke_width=stroke)
-        except TypeError:  # 老版本 Pillow 不支持 stroke_width
+            box = font.getbbox(text, stroke_width=stroke, anchor="ls")
+        except TypeError:  # 老版本 Pillow 不支持 anchor / stroke_width
             box = font.getbbox(text)
         # stroke 是浮点时 getbbox 也返回浮点，画布尺寸必须取整
         width = int(math.ceil(box[2] - box[0] + 2 * PAD))
@@ -78,13 +83,31 @@ def render_preview(
             continue
         image = Image.new("RGB", (max(width, 24), max(height, 24)), bg)
         draw = ImageDraw.Draw(image)
-        draw.text(
-            (PAD - box[0], PAD - box[1]),
-            text,
-            font=font,
-            fill=fg,
-            stroke_width=stroke,
-            stroke_fill=fg,
-        )
+        origin_y = PAD - box[1]
+        # letter_x 是「相对文字中心」的偏移，而 Pillow 从画布左端开始画，
+        # 所以要先平移到中心：左端 + 半宽
+        center_x = PAD - box[0] + (box[2] - box[0]) / 2
+        if letter_x and len(letter_x) == len(text):
+            # 视觉等距：逐字按 letter_x 落位，和 OpenSCAD 端用同一套坐标
+            for ch, lx in zip(text, letter_x):
+                draw.text(
+                    (center_x + lx * scale, origin_y),
+                    ch,
+                    font=font,
+                    fill=fg,
+                    stroke_width=stroke,
+                    stroke_fill=fg,
+                    anchor="ls",
+                )
+        else:
+            draw.text(
+                (PAD - box[0], origin_y),
+                text,
+                font=font,
+                fill=fg,
+                stroke_width=stroke,
+                stroke_fill=fg,
+                anchor="ls",
+            )
         return image, scale
     return None

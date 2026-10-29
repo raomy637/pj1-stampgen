@@ -8,6 +8,6 @@
 * :func:`stampgen.batch.run_batch`
 """
 
-__version__ = "2.2.4"
+__version__ = "2.2.5"
 
 __all__ = ["__version__"]

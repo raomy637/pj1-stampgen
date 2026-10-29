@@ -299,7 +299,7 @@ class StampApp:
         # 固定高度的预览容器：图换尺寸时布局不跳
         self.preview_holder = tk.Frame(
             box,
-            height=70,
+            height=88,
             background=COLOR_PREVIEW_BG,
             highlightthickness=1,
             highlightbackground=COLOR_PREVIEW_BORDER,
@@ -540,12 +540,28 @@ class StampApp:
         except ValueError:
             size_mm, weight = 6.0, 0.0
         names = self._read_names()
-        text = fontpreview.sample_text(self._case_mode(), names[0] if names else "")
+        try:
+            spacing = float(self.var_spacing.get())
+        except ValueError:
+            spacing = 1.0
+
+        # 有名字就预览这个名字（逐字等距，和打印完全一致）；没有才显示样例
+        if names:
+            text = names[0]
+            letter_x = metrics.letter_positions(
+                self.library.metrics(face), text, size_mm, spacing, weight
+            )
+            caption = f"预览：{text}"
+        else:
+            text = fontpreview.sample_text(self._case_mode(), "")
+            letter_x = None
+            caption = "预览：字体样例（输入名字后显示该名字）"
+
         # 把当前参数写出来：加粗 0.02mm 的视觉差异很小，有数字回显才确认得了
         self.var_preview_caption.set(
-            f"字号 {size_mm:g}mm · 加粗 {weight:g}mm · "
+            f"{caption} · 字号 {size_mm:g}mm · 加粗 {weight:g}mm · "
             f"{CASE_LABELS.get(self._case_mode(), '保持原样')} · "
-            f"预览仅供参考，成品尺寸以生成时的实测探针为准"
+            f"字符等距，与实际打印一致"
         )
         width = max(self.preview_holder.winfo_width() - 16, 480)
         rendered = fontpreview.render_preview(
@@ -553,6 +569,7 @@ class StampApp:
             text,
             size_mm,
             weight,
+            letter_x=letter_x,
             max_px=width,
             bg=COLOR_PREVIEW_BG,
         )

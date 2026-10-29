@@ -322,3 +322,70 @@ def test_resolve_curve_auto_for_dense_font(face, spec):
     if not face.is_dense_outline:
         pytest.skip("该字体不是密集轮廓")
     assert metrics.resolve_curve(face, spec) == metrics.CURVE_DENSE
+
+
+# ---------------- 视觉等距排布 ----------------
+
+
+def _gaps(metrics_of, text, size_mm, weight=0.0):
+    """按 letter_positions 算出的落点，返回每对相邻字母的墨迹间隙（mm）。"""
+    pos = metrics.letter_positions(metrics_of, text, size_mm, 1.0, weight)
+    scale = size_mm * metrics.INK_SCALE
+    gaps = []
+    for i in range(len(text) - 1):
+        right = pos[i] + metrics_of.bboxes[ord(text[i])][1] / metrics_of.upem * scale
+        left = pos[i + 1] + metrics_of.bboxes[ord(text[i + 1])][0] / metrics_of.upem * scale
+        gaps.append(left - right)
+    return gaps
+
+
+def test_letter_positions_make_gaps_equal(metrics_of):
+    """等宽字体只保证占位相同，这里要让墨迹间隙也相同。"""
+    gaps = _gaps(metrics_of, "AMANDA", 6.0)
+    assert len(gaps) == 5
+    for g in gaps:
+        assert g == pytest.approx(gaps[0], abs=1e-6)
+
+
+def test_letter_positions_keep_total_width(metrics_of):
+    """重排间隙不能改变总宽，否则底座长度和限宽判断全要跟着改。"""
+    text = "AMANDA"
+    pos = metrics.letter_positions(metrics_of, text, 6.0, 1.0, 0.0)
+    scale = 6.0 * metrics.INK_SCALE
+    left = pos[0] + metrics_of.bboxes[ord(text[0])][0] / metrics_of.upem * scale
+    last = text[-1]
+    right = pos[-1] + metrics_of.bboxes[ord(last)][1] / metrics_of.upem * scale
+    assert right - left == pytest.approx(
+        metrics.predict_width(metrics_of, text, 6.0, 1.0, 0.0), abs=1e-6
+    )
+
+
+def test_letter_positions_single_char_is_centered(metrics_of):
+    pos = metrics.letter_positions(metrics_of, "A", 6.0, 1.0, 0.0)
+    assert len(pos) == 1
+    scale = 6.0 * metrics.INK_SCALE
+    box = metrics_of.bboxes[ord("A")]
+    left = pos[0] + box[0] / metrics_of.upem * scale
+    right = pos[0] + box[1] / metrics_of.upem * scale
+    assert (left + right) / 2 == pytest.approx(0.0, abs=1e-6)
+
+
+def test_letter_positions_equal_with_bold(metrics_of):
+    gaps = _gaps(metrics_of, "AMANDA", 6.0, weight=0.2)
+    for g in gaps:
+        assert g == pytest.approx(gaps[0], abs=1e-6)
+
+
+def test_letter_positions_empty(metrics_of):
+    assert metrics.letter_positions(metrics_of, "  ", 6.0) == []
+
+
+def test_fit_fills_letter_x_by_default(metrics_of, roomy):
+    fit = metrics.fit(metrics_of, "AMANDA", roomy)
+    assert len(fit.letter_x) == len("AMANDA")
+
+
+def test_fit_can_turn_off_even_spacing(metrics_of):
+    spec = StampSpec(font_size_mm=6.0, weight_offset_mm=0.0, even_spacing=False)
+    fit = metrics.fit(metrics_of, "AMANDA", spec)
+    assert fit.letter_x == []

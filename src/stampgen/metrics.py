@@ -142,6 +142,12 @@ class FitResult:
     fill_ratio: float = 0.0
     """文字宽占上限的比例。短名字会明显小于 1，这是正常的。"""
 
+    letter_x: list[float] = field(default_factory=list)
+    """逐字等距排布时每个字符的位置（advance 原点，相对文字中心）。
+
+    空表示按字体原本的字距排布（``text(spacing=...)``）。
+    """
+
     @property
     def ok(self) -> bool:
         return self.status not in _BLOCKING
@@ -249,6 +255,61 @@ def text_offset_y(metrics: FaceMetrics, text: str, size_mm: float) -> float:
     if not metrics.upem or not text:
         return 0.0
     return -metrics.ink_y_center(text) / metrics.upem * size_mm * INK_SCALE
+
+
+def letter_positions(
+    metrics: FaceMetrics,
+    text: str,
+    size_mm: float,
+    spacing: float = 1.0,
+    weight_offset_mm: float = 0.0,
+) -> list[float]:
+    """逐字等距排布时，每个字符的 advance 原点相对文字中心的 X 偏移（毫米）。
+
+    等宽字体只保证「占位相同」，不保证「墨迹间隙相同」——
+    M 墨迹 5.07mm 几乎占满格子、A 只有 4.59mm 还偏左，
+    结果 A→M 间隙 1.10mm、M→A 是 -0.17mm（重叠）。
+
+    这里改用视觉等距：**总宽完全不变**（等于 :func:`predict_width`，
+    所以底座长度、限宽判断都不用改），只是把间隙重新平均分配：
+
+        gap = (总宽 - Σ墨迹宽) / (字符数 - 1)
+
+    返回的位置是 OpenSCAD ``text(halign="left")`` 需要的 advance 原点，
+    直接 ``translate([x, 0])`` 即可。
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    weight = max(0.0, weight_offset_mm)
+    scale = size_mm * INK_SCALE
+
+    x_mins: list[float] = []
+    widths: list[float] = []
+    for ch in text:
+        box = metrics.bboxes.get(ord(ch))
+        x_min = box[0] / metrics.upem * scale if box else 0.0
+        x_max = box[1] / metrics.upem * scale if box else 0.0
+        x_mins.append(x_min)
+        widths.append(max(0.0, x_max - x_min))
+
+    total = predict_width(metrics, text, size_mm, spacing, weight)
+    if total <= 0:
+        return []
+
+    if len(text) == 1:
+        # 单字符没有间隙，只要墨迹居中
+        return [-(widths[0] + 2.0 * weight) / 2.0 - x_mins[0] + weight]
+
+    cell = [w + 2.0 * weight for w in widths]
+    gap = (total - sum(cell)) / (len(text) - 1)
+    positions: list[float] = []
+    cursor = -total / 2.0
+    for i in range(len(text)):
+        # cursor 是「含加粗的墨迹左边界」，换算成 advance 原点
+        positions.append(cursor - x_mins[i] + weight)
+        cursor += cell[i] + gap
+    return positions
 
 
 def size_cap_from_base(metrics: FaceMetrics, spec: StampSpec, text: str = "") -> float:
@@ -469,6 +530,12 @@ def fit(
 
     width = width_at(size, spacing) * scale
     base_len = spec.base_len_for(width)
+    # 视觉等距：总宽不变，只重排间隙，保证打印出来字符间距一致
+    letter_x = (
+        letter_positions(metrics, text, size, spacing, weight)
+        if spec.even_spacing
+        else []
+    )
     fill = width / limit if limit > 0 else 0.0
 
     return FitResult(
@@ -481,4 +548,5 @@ def fit(
         notes=notes,
         limit_mm=limit,
         fill_ratio=round(fill, 4),
+        letter_x=[round(v, 4) for v in letter_x],
     )
