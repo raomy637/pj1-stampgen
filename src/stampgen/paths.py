@@ -4,8 +4,11 @@
 
 * ``resource_root()``：随程序分发的只读资源（``fonts/``、``scad/``、``assets/``）。
   源码运行时指向项目根；PyInstaller 打包后指向解包临时目录 ``sys._MEIPASS``。
-* ``app_root()``：可写的应用目录，配置文件与缓存放这里。
+* ``app_root()``：可写的应用目录，缓存放这里。
   源码运行时是项目根；打包后是 exe 所在目录。
+* ``config_dir()``：**用户配置目录**，跨版本共享。
+  放 exe 同目录时，换一个版本文件夹配置就找不到了（dist/ → dist/v2.2.x/），
+  用户会以为「默认参数被改了」。所以配置统一放 %APPDATA%\\stampgen\\。
 """
 
 from __future__ import annotations
@@ -79,7 +82,26 @@ def cache_dir() -> Path:
         return fallback
 
 
+def config_dir() -> Path:
+    """用户配置目录（跨版本共享）。
+
+    Windows 用 ``%APPDATA%\\stampgen``，其它平台用 ``~/.config/stampgen``。
+    """
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return Path(appdata) / "stampgen"
+    return Path.home() / ".config" / "stampgen"
+
+
 def config_path() -> Path:
+    return config_dir() / "stampgen_config.json"
+
+
+def legacy_config_path() -> Path:
+    """v2.2.3 及更早版本的配置位置（exe 同目录）。
+
+    仅用于首次启动时把老配置搬进 ``config_dir()``，之后不再读写。
+    """
     return app_root() / "stampgen_config.json"
 
 

@@ -184,7 +184,7 @@ def test_check_spec_skips_cap_check_without_names(metrics_of):
 
 
 def test_check_spec_flags_descender_name(metrics_of):
-    spec = StampSpec(font_size_mm=6.0)
+    spec = StampSpec(font_size_mm=6.0, weight_offset_mm=0.0)
     spec.base_width_mm = metrics.ink_height_mm(metrics_of, "DAISY", 6.0) + 0.05
     issues = validate.check_spec(metrics_of, spec, ["DAISY", "Daisy"])
     issue = next(i for i in issues if i.code == "base_widened")

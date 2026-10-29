@@ -26,7 +26,7 @@ SIZE = 6.0
 @pytest.fixture()
 def roomy(metrics_of) -> StampSpec:
     """底座宽度够装下 6mm 字号的参数，排除「限字高」干扰。"""
-    spec = StampSpec()
+    spec = StampSpec(weight_offset_mm=0.0)
     spec.font_size_mm = SIZE
     spec.base_width_mm = metrics.ink_height_mm(metrics_of, "BELLA", SIZE) + 0.1
     return spec
@@ -100,12 +100,15 @@ def test_descender_makes_text_taller(metrics_of):
 
 def test_size_cap_subtracts_bold_expansion(metrics_of):
     """加粗会让墨迹上下各外扩 weight，上限必须跟着降（v2.1.0 这里漏算过）。"""
-    plain = metrics.size_cap_from_base(metrics_of, StampSpec(weight_offset_mm=0.0))
-    bold = metrics.size_cap_from_base(metrics_of, StampSpec(weight_offset_mm=0.2))
+    plain_spec = StampSpec(weight_offset_mm=0.0)
+    bold_spec = StampSpec(weight_offset_mm=0.2)
+    plain = metrics.size_cap_from_base(metrics_of, plain_spec)
+    bold = metrics.size_cap_from_base(metrics_of, bold_spec)
     assert bold < plain
+    # 加粗 0.2 时，墨迹高 + 2×0.2 正好等于底座宽度
     assert metrics.ink_height_mm(
         metrics_of, metrics.UPPERCASE_SAMPLE, bold
-    ) + 0.4 == pytest.approx(6.0, rel=1e-6)
+    ) + 0.4 == pytest.approx(bold_spec.base_width_mm, rel=1e-6)
 
 
 def test_base_len_inverts_max_text_width(spec):
@@ -178,7 +181,7 @@ def test_fit_marks_too_long_with_suggestion(metrics_of, roomy):
 
 def test_fit_ignores_overshoot_within_tolerance(metrics_of):
     """圆形字母的 overshoot 是字形设计，容差以内不该动任何东西。"""
-    spec = StampSpec(font_size_mm=6.0)
+    spec = StampSpec(font_size_mm=6.0, weight_offset_mm=0.0)
     spec.base_width_mm = metrics.ink_height_mm(metrics_of, "BELLA", 6.0) - 0.1
     fit = metrics.fit(metrics_of, "BELLA", spec)
     assert fit.status == "ok"
@@ -191,7 +194,7 @@ def test_fit_ignores_overshoot_within_tolerance(metrics_of):
 
 def test_fit_widens_base_instead_of_shrinking(metrics_of):
     """装不下时默认加宽底座：字号是视觉主体，不能为它让步。"""
-    spec = StampSpec(font_size_mm=9.0, base_width_mm=6.0)
+    spec = StampSpec(font_size_mm=9.0, base_width_mm=6.0, weight_offset_mm=0.0)
     fit = metrics.fit(metrics_of, "BELLA", spec)
     assert fit.status == "wider_base"
     assert fit.size_mm == pytest.approx(9.0)
@@ -200,7 +203,7 @@ def test_fit_widens_base_instead_of_shrinking(metrics_of):
 
 
 def test_widen_rounds_up_to_tenth(metrics_of):
-    spec = StampSpec(font_size_mm=6.0)
+    spec = StampSpec(font_size_mm=6.0, weight_offset_mm=0.0)
     spec.base_width_mm = metrics.ink_height_mm(metrics_of, "BELLA", 6.0) - 0.4
     fit = metrics.fit(metrics_of, "BELLA", spec)
     total = metrics.ink_height_mm(metrics_of, "BELLA", 6.0)
@@ -218,7 +221,7 @@ def test_other_names_keep_default_base_width(metrics_of):
 
 
 def test_fit_caps_size_when_widen_disabled(metrics_of):
-    spec = StampSpec(font_size_mm=9.0, base_width_mm=6.0, widen_base_per_name=False)
+    spec = StampSpec(font_size_mm=9.0, base_width_mm=6.0, weight_offset_mm=0.0, widen_base_per_name=False)
     fit = metrics.fit(metrics_of, "BELLA", spec)
     assert fit.status == "size_capped"
     assert fit.size_mm < 9.0
@@ -245,7 +248,7 @@ def test_widen_note_mentions_bold_expansion(metrics_of):
 
 
 def test_wider_base_label_is_short(metrics_of):
-    spec = StampSpec(font_size_mm=9.0, base_width_mm=6.0)
+    spec = StampSpec(font_size_mm=9.0, base_width_mm=6.0, weight_offset_mm=0.0)
     fit = metrics.fit(metrics_of, "BELLA", spec)
     assert fit.label == "加宽"
     assert fit.needs_attention
@@ -265,7 +268,7 @@ def test_fit_missing_glyph(metrics_of, spec):
 
 
 def test_fit_invalid_when_margin_too_large(metrics_of):
-    spec = StampSpec(max_width_mm=10.0, margin_mm=6.0)
+    spec = StampSpec(max_width_mm=10.0, margin_mm=6.0, weight_offset_mm=0.0)
     fit = metrics.fit(metrics_of, "BELLA", spec)
     assert fit.status == "invalid"
     assert not fit.ok

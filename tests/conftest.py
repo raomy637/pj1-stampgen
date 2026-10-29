@@ -31,7 +31,12 @@ def metrics_of(library: FontLibrary, face):
 
 @pytest.fixture()
 def spec() -> StampSpec:
-    return StampSpec()
+    """测试基准参数。
+
+    显式关掉几何加粗：生产默认值会随使用习惯调整（现在是 6.6mm / 加粗 0.2），
+    测试若跟着漂移，断言的数字就永远对不上。
+    """
+    return StampSpec(weight_offset_mm=0.0)
 
 
 @pytest.fixture(scope="session")

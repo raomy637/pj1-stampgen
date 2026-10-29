@@ -7,6 +7,7 @@ v2.2.0 起只有一种宽度逻辑：**限宽**。字号由用户给定，底座
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,7 @@ class StampSpec:
     """
 
     # --- 印章几何 ---
-    base_width_mm: float = 6.0
+    base_width_mm: float = 6.6
     """底座宽度（Y 方向）。字高不得超过它，否则字母会悬在底座外。
 
     开启 :attr:`widen_base_per_name` 时它变成「默认/最小」宽度：
@@ -78,7 +79,7 @@ class StampSpec:
     min_spacing: float = 0.85
     """超宽时允许压缩到的间距下限。再往下字形会粘连。"""
 
-    weight_offset_mm: float = 0.0
+    weight_offset_mm: float = 0.2
     """几何加粗量（``offset(delta)``）。0 表示不加粗，安全上限约 0.3mm。"""
 
     case_mode: str = "keep"
@@ -118,7 +119,9 @@ class StampSpec:
 @dataclass
 class AppConfig:
     openscad_path: str = ""
-    font_family: str = ""
+    font_family: str = "Special Elite"
+    """默认字体。找不到时 FontLibrary.find() 会退回字体库第一个，不会报错。"""
+
     font_style: str = "Regular"
     names_txt: str = ""
     output_root_dir: str = ""
@@ -209,8 +212,28 @@ def config_to_dict(cfg: AppConfig) -> dict[str, Any]:
     return asdict(cfg)
 
 
+def _migrate_legacy_config(target: Path) -> None:
+    """把 exe 同目录的老配置搬到用户配置目录（只做一次）。
+
+    v2.2.3 及更早版本把配置写在 exe 旁边，换个版本文件夹就找不到，
+    用户会以为「默认参数被改了」。搬到 %APPDATA% 之后所有版本共用一份。
+    """
+    if target.is_file():
+        return
+    legacy = paths.legacy_config_path()
+    if not legacy.is_file() or legacy.resolve() == target.resolve():
+        return
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy, target)
+    except OSError:
+        pass  # 搬不过去就用默认值，不该因此起不来
+
+
 def load_config(path: Path | None = None) -> AppConfig:
     p = path or paths.config_path()
+    if path is None:
+        _migrate_legacy_config(p)
     if not p.is_file():
         return default_config()
     try:

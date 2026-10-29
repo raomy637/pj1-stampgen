@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stampgen"
-version = "2.2.3"
+version = "2.2.4"
 description = "名字印章批量生成工具：字号固定、底座按名字伸缩且不超上限"
 readme = "README.md"
 requires-python = ">=3.10"

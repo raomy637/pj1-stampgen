@@ -6,6 +6,7 @@ import json
 import tempfile
 from pathlib import Path
 
+from stampgen import paths
 from stampgen.config import (
     CASE_MODES,
     AppConfig,
@@ -169,3 +170,53 @@ def test_base_len_for_inverts_max_text_width():
 
 def test_open_output_default_is_on():
     assert AppConfig().open_output_after_run is True
+
+
+# ---------------- 配置位置与迁移 ----------------
+
+
+def test_config_lives_under_appdata(monkeypatch, tmp_path):
+    """配置不能放 exe 同目录：换个版本文件夹就找不到了。"""
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    assert paths.config_dir() == tmp_path / "stampgen"
+    assert paths.config_path() == tmp_path / "stampgen" / "stampgen_config.json"
+
+
+def test_migrates_legacy_config_once(monkeypatch, tmp_path):
+    """首次用新路径时，把 exe 同目录的老配置搬过来，参数不丢。"""
+    appdata = tmp_path / "appdata"
+    legacy = tmp_path / "app" / "stampgen_config.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        json.dumps({"font_family": "X", "spec": {"max_width_mm": 42}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("APPDATA", str(appdata))
+    monkeypatch.setattr(paths, "legacy_config_path", lambda: legacy)
+
+    cfg = load_config()
+    assert cfg.font_family == "X"
+    assert cfg.spec.max_width_mm == 42
+    assert paths.config_path().is_file()
+
+
+def test_migration_keeps_existing_config(monkeypatch, tmp_path):
+    """AppData 里已经有配置时不能被老配置覆盖。"""
+    appdata = tmp_path / "appdata"
+    legacy = tmp_path / "app" / "stampgen_config.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(json.dumps({"font_family": "OLD"}), encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(appdata))
+    monkeypatch.setattr(paths, "legacy_config_path", lambda: legacy)
+
+    current = paths.config_path()
+    current.parent.mkdir(parents=True)
+    current.write_text(json.dumps({"font_family": "NEW"}), encoding="utf-8")
+
+    assert load_config().font_family == "NEW"
+
+
+def test_migration_survives_missing_legacy(monkeypatch, tmp_path):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setattr(paths, "legacy_config_path", lambda: tmp_path / "nope.json")
+    cfg = load_config()
+    assert cfg.spec.max_width_mm > 0

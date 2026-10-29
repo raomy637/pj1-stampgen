@@ -25,6 +25,7 @@ def cfg(face, metrics_of) -> AppConfig:
     cfg.spec = StampSpec(
         font_size_mm=SIZE,
         max_width_mm=MAX_WIDTH,
+        weight_offset_mm=0.0,
         # 底座宽度按该字体实际墨迹高度给，避免"限字高"掩盖了限宽逻辑
         base_width_mm=metrics.ink_height_mm(metrics_of, "BELLA", SIZE) + 0.2,
     )
@@ -92,6 +93,7 @@ def test_batch_never_exceeds_max_width(tmp_path, face, metrics_of, library):
     cfg.spec = StampSpec(
         font_size_mm=SIZE,
         max_width_mm=30.0,
+        weight_offset_mm=0.0,
         base_width_mm=metrics.ink_height_mm(metrics_of, "BELLA", SIZE) + 0.2,
     )
     report = batch.run_batch(cfg, ["AVA", "BELLA", "GRACIE"], tmp_path / "lim", library=library)
@@ -115,6 +117,7 @@ def test_batch_widens_base_for_tall_name(tmp_path, face, metrics_of, library):
     cfg.spec = StampSpec(
         font_size_mm=SIZE,
         max_width_mm=MAX_WIDTH,
+        weight_offset_mm=0.0,
         base_width_mm=metrics.ink_height_mm(metrics_of, "TESS", SIZE) + 0.2,
     )
     report = batch.run_batch(cfg, ["TESS", "Daisy"], tmp_path / "wide", library=library)
