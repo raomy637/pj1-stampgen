@@ -43,3 +43,6 @@ OpenSCAD/
 Thumbs.db
 desktop.ini
 .idea/
+
+# --- 一次性备份（文档治理前，确认后可删） ---
+backup_docs_*/

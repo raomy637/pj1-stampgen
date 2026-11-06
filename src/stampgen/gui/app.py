@@ -545,11 +545,16 @@ class StampApp:
         except ValueError:
             spacing = 1.0
 
-        # 有名字就预览这个名字（逐字等距，和打印完全一致）；没有才显示样例
+        even = self.cfg.spec.even_spacing
+        # 有名字就预览这个名字（按当前等距设置排布，和打印完全一致）；没有才显示样例
         if names:
             text = names[0]
-            letter_x = metrics.letter_positions(
-                self.library.metrics(face), text, size_mm, spacing, weight
+            letter_x = (
+                metrics.letter_positions(
+                    self.library.metrics(face), text, size_mm, spacing, weight
+                )
+                if even
+                else None
             )
             caption = f"预览：{text}"
         else:
@@ -561,7 +566,7 @@ class StampApp:
         self.var_preview_caption.set(
             f"{caption} · 字号 {size_mm:g}mm · 加粗 {weight:g}mm · "
             f"{CASE_LABELS.get(self._case_mode(), '保持原样')} · "
-            f"字符等距，与实际打印一致"
+            f"{'字符等距' if even else '字体原字距'}，与实际打印一致"
         )
         width = max(self.preview_holder.winfo_width() - 16, 480)
         rendered = fontpreview.render_preview(

@@ -380,12 +380,13 @@ def test_letter_positions_empty(metrics_of):
     assert metrics.letter_positions(metrics_of, "  ", 6.0) == []
 
 
-def test_fit_fills_letter_x_by_default(metrics_of, roomy):
+def test_fit_keeps_natural_spacing_by_default(metrics_of, roomy):
+    """默认不做视觉等距：letter_x 为空，走 OpenSCAD 单串 text()（与 v1.x 一致）。"""
     fit = metrics.fit(metrics_of, "AMANDA", roomy)
-    assert len(fit.letter_x) == len("AMANDA")
-
-
-def test_fit_can_turn_off_even_spacing(metrics_of):
-    spec = StampSpec(font_size_mm=6.0, weight_offset_mm=0.0, even_spacing=False)
-    fit = metrics.fit(metrics_of, "AMANDA", spec)
     assert fit.letter_x == []
+
+
+def test_fit_fills_letter_x_when_even_spacing_on(metrics_of):
+    spec = StampSpec(font_size_mm=6.0, weight_offset_mm=0.0, even_spacing=True)
+    fit = metrics.fit(metrics_of, "AMANDA", spec)
+    assert len(fit.letter_x) == len("AMANDA")

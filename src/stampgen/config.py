@@ -66,29 +66,45 @@ class StampSpec:
     只有算出超过上限时才压缩（先压间距，再缩字号）。
     """
 
-    margin_mm: float = 1.5
-    """文字左右留白（单边）。底座长度 = 文字宽 + 2 × 留白。"""
+    margin_mm: float = 3.5
+    """文字左右留白（单边）。底座长度 = 文字宽 + 2 × 留白。
+
+    v1.x 用「字符数 → 底座长」查表（2 字 18、3 字 24、4 字 30…），换算成留白
+    是 3.5~4mm，比 1.5mm 松弛得多，成品看起来字不顶边。实测旧成品
+    ``BO`` 底座 18mm、墨迹 10.92mm，单边留白 3.54mm，取 3.5mm 基本重合。
+    """
 
     # --- 字体 ---
     font_size_mm: float = 6.0
     """字号。仍受底座宽度约束（字高不得超过底座宽），超出时自动压低并提示。"""
 
     letter_spacing: float = 1.0
-    """字间距。1.0 为字体原字距，大于 1 更疏、小于 1 更紧。"""
+    """字间距。1.0 为字体原字距，大于 1 更疏、小于 1 更紧。
 
-    even_spacing: bool = True
-    """逐字等距排布。
+    默认 1.0：v1.x 的模板里没有 ``letter_spacing`` 变量（``main.py`` 传的
+    ``-D letter_spacing=1.2`` 被 OpenSCAD 直接忽略），成品一直是字体原字距。
+    实测 v1.x 的 ``BO`` 墨迹宽 10.92mm，和 1.0 完全一致；设成 1.2 会宽到
+    12.01mm，字母之间明显发空。
+    """
 
-    等宽字体的「占位」相同，但「墨迹间隙」不同（M 几乎占满格子、A 偏左）。
-    开启后按墨迹宽重新平均分配间隙，打印出来字符间距一致；
-    总宽不变，所以底座长度与限宽判断都不受影响。
+    even_spacing: bool = False
+    """逐字等距排布（按墨迹宽平均分配间隙）。
+
+    默认关闭：开启后字距由程序重排，会偏离字体设计师给定的节奏，Arial 这类
+    比例字体尤其明显（v1.x 没有这个功能，关掉才和旧成品一致）。等宽字体
+    （Daziji / Special Elite 系列）想要绝对均匀的间隙时再打开。
     """
 
     min_spacing: float = 0.85
     """超宽时允许压缩到的间距下限。再往下字形会粘连。"""
 
-    weight_offset_mm: float = 0.2
-    """几何加粗量（``offset(delta)``）。0 表示不加粗，安全上限约 0.3mm。"""
+    weight_offset_mm: float = 0.0
+    """几何加粗量（``offset(delta)``）。0 表示不加粗，安全上限约 0.3mm。
+
+    默认 0：Arial 在 6mm 字号下笔画约 0.82mm，本身够粗；再叠加 0.2mm 会让
+    e/a/o 的字腔（counter）缩到 0.5mm 以下，打印容易糊死。换细笔画字体
+    （做旧体、手写体）时再按需加粗。
+    """
 
     case_mode: str = "keep"
     """大小写转换，取值见 :data:`CASE_MODES`。"""
@@ -127,8 +143,13 @@ class StampSpec:
 @dataclass
 class AppConfig:
     openscad_path: str = ""
-    font_family: str = "Special Elite"
-    """默认字体。找不到时 FontLibrary.find() 会退回字体库第一个，不会报错。"""
+    font_family: str = "Arial"
+    """默认字体。找不到时 FontLibrary.find() 会退回字体库第一个，不会报错。
+
+    Arial 与 v1.x 模板硬编码的 ``font_name = "Arial"`` 一致：无做旧噪点、
+    笔画 0.82mm，小字号打印边缘最干净。Special Elite 等做旧体适合看样，
+    实际出货不如 Arial 清晰。
+    """
 
     font_style: str = "Regular"
     names_txt: str = ""

@@ -23,6 +23,24 @@ FONT_SUFFIXES = {".ttf", ".otf"}
 _FAMILY_IDS = (16, 1)
 _STYLE_IDS = (17, 2)
 
+SYSTEM_FONT_FILES = (
+    "arial.ttf",
+    "arialbd.ttf",
+    "ariali.ttf",
+    "arialbi.ttf",
+)
+"""允许从系统字体目录额外加载的字体文件名（只列白名单，不全量扫描）。
+
+为什么要这个：v1.x 的模板把 ``font_name`` 硬编码成 ``"Arial"``，成品笔画宽
+约 0.82mm、字面无做旧噪点，0.4mm 喷嘴打出来边缘干净。v2.x 的默认字体换成
+了 Special Elite 这类做旧打字机体，6mm 字号下笔画只有 0.57mm、轮廓带锯齿，
+同样工艺打印会显得发虚、笔画断续。把 Arial 重新纳入字体库，才能复现 v1.x
+的成品效果。
+
+只读系统字体、不复制文件：Arial 是 Monotype 的商业字体，随程序分发有授权
+问题，指到系统里已装的那份即可（fontconfig 本来就会扫系统目录）。
+"""
+
 
 @dataclass(frozen=True)
 class FontFace:
@@ -335,9 +353,31 @@ class FontLibrary:
                     continue  # 同族同重名重复文件，保留先出现的
                 seen[key] = face
                 faces.append(face)
+
+        # 内置目录没有时，补上白名单里的系统字体（如 Arial）
+        for path in self._system_candidates():
+            face = _load_face(path)
+            if face is None:
+                continue
+            key = (face.family.lower(), face.style.lower())
+            if key in seen:
+                continue
+            seen[key] = face
+            faces.append(face)
+
         faces.sort(key=lambda f: (f.family.lower(), f.style.lower()))
         self._faces = faces
         return faces
+
+    def _system_candidates(self) -> list[Path]:
+        """白名单系统字体里，实际存在的文件。"""
+        found: list[Path] = []
+        for directory in _system_font_dirs():
+            for filename in SYSTEM_FONT_FILES:
+                path = directory / filename
+                if path.is_file():
+                    found.append(path)
+        return found
 
     def faces(self) -> list[FontFace]:
         return self.scan()
