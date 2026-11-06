@@ -186,3 +186,4 @@ data/ dist/ build/ OpenSCAD/ .venv313/ .cache/   数据与产物，不入库
 | 打包 exe 与产物验证 | [docs/guides/packaging.md](docs/guides/packaging.md) |
 | 旧版对照 / 同事还在用旧版 | [docs/guides/legacy-migration.md](docs/guides/legacy-migration.md) |
 | 目录结构全貌 | [docs/guides/structure.md](docs/guides/structure.md) |
+| 机器 / git / 账号 / 备份与清理 | [docs/guides/ops.md](docs/guides/ops.md) |

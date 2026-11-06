@@ -35,7 +35,7 @@ PJ1/
 ├── assets/                 # 图标
 ├── docs/
 │   ├── plans/              # 设计文档（每次重构的方案与决策，文首有「状态」）
-│   ├── guides/             # 细节文档（限宽 / 字体 / 原理 / 打包 / 迁移 / 本文件）
+│   ├── guides/             # 细节文档（限宽 / 字体 / 原理 / 打包 / 迁移 / 配置 / 运维 / 本文件）
 │   └── assets/             # 文档配图与参数表（字体对比、字粒-字距表）
 ├── tests/                  # pytest（118 单测 + 14 端到端）
 ├── tools/
@@ -47,17 +47,17 @@ PJ1/
 │   ├── entry_gui.py        # 打包入口（界面，带崩溃兜底）
 │   └── entry_cli.py        # 打包入口（命令行）
 ├── letter_blocks/          # 字母块子项目（独立：自带 README / scad / scripts / out）
-├── data/                   # 业务数据（不入库，约 415MB）
+├── data/                   # 业务数据（不入库，约 350MB）
 │   ├── names/              # 名字清单
-│   ├── output_stl/         # 生成结果（按 output_stl<批次号>\<时间戳>\ 分层）
+│   ├── output_stl/         # 生成结果（按 output_stl<批次号>\<时间戳>\ 分层，现 71 个批次）
 │   ├── new_output_stl/     # 换字体试做的结果
 │   └── 订单/               # 订单原始文件
-├── build/                  # PyInstaller 中间产物（spec / tmp / work / version_*.txt，不入库）
-├── dist/                   # 成品：vX.Y.Z/ + legacy/，不入库
+├── build/                  # PyInstaller 中间产物（spec / tmp / work / version_*.txt，不入库，可整删）
+├── dist/                   # 成品：vX.Y.Z/ + legacy/，不入库，只保留当前版本
 ├── OpenSCAD/               # 便携 OpenSCAD（不入库）
 ├── .venv313/               # 唯一的虚拟环境（不入库）
 ├── .cache/                 # 一次性调试脚本与实测截图（不入库，可随时删）
-├── backup_docs_20261106/   # 2026-11-06 文档治理前的一次性备份（确认后可删）
+├── backup_docs_20261106/   # 2026-11-06 文档治理前的一次性备份（已 gitignore，确认后可删）
 ├── CHANGELOG.md            # 更新日志
 ├── README.md               # 索引：快速开始 / 参数 / 限制 / 开发
 ├── run.bat                 # 新版图形界面
@@ -65,9 +65,19 @@ PJ1/
 └── run-legacy-py.bat       # 旧版源码方式
 ```
 
-## 两个容易误解的点
+项目外还有一个归档区（同盘，不进版本库）：
 
-- `build/` 现在只有 PyInstaller 的中间产物，可以整个删掉回收空间。
+```
+D:\HA1\archive\
+├── output_stl_2026Q1\      # 2026 年 1~3 月的 78 个批次（需要时移回 data\output_stl\ 即可）
+└── releases\               # 历史发布包
+```
+
+## 三个容易误解的点
+
+- `build/` 只有 PyInstaller 的中间产物，可以整个删掉回收空间。
   早期重构的归档区 `build/trash/` **已不存在**，历史慢包由 `dist/legacy/` 取代。
 - `dist/` 里每个版本目录各带一份便携 OpenSCAD（约 48MB），
   只保留当前版本即可，旧版本目录删掉不影响已装好的程序。
+- `data/output_stl/` 只放**最近约半年**的批次，更早的移到 `D:\HA1\archive\`。
+  清理规则与恢复方式见 `docs/guides/ops.md`。

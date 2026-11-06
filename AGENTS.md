@@ -1,7 +1,8 @@
 # AGENTS.md — stampgen 项目入口
 
 > **唯一入口，只做路由。不要一次读完所有文档**：本文件（≤120 行）→ `README.md`（索引）→ `docs/guides/*.md`（细节）。
-> 运行环境：`3dprint`（DESKTOP-E72MK8D / 192.168.68.44）→ `D:\HA1\PJ1`，Windows，**该机没有 git 客户端**。
+> 运行环境：`3dprint`（DESKTOP-E72MK8D / 192.168.68.44）→ `D:\HA1\PJ1`，Windows。
+> git 用便携版 `D:\Tools\PortableGit\cmd\git.exe`（2026-11-06 装，已进用户 PATH）。
 
 ## 这是什么
 
@@ -49,6 +50,7 @@ run.bat
 | 旧版对照（同事还在用旧版） | `docs/guides/legacy-migration.md` + `legacy/README.md` |
 | 查某次重构为什么这么定 | `docs/plans/`（按日期命名，文首有「状态」） |
 | 查某个版本改了什么 | `CHANGELOG.md` |
+| 机器 / git / 账号 / 备份 / 清理规则 | `docs/guides/ops.md` |
 | 找素材 / 实测截图 | `docs/assets/`、`.cache/`（临时脚本与截图，可删） |
 
 ## 目录速查
@@ -71,11 +73,25 @@ data/ dist/ build/ OpenSCAD/ .venv313/   数据与产物，不入库
 ## 常用命令
 
 ```bat
-.venv313\Scripts\python.exe -m pytest --ignore=tests/test_e2e.py   :: 快速层，秒级
-.venv313\Scripts\python.exe -m pytest tests\test_e2e.py            :: 端到端，约 3 分钟
-.venv313\Scripts\python.exe -m stampgen check                      :: 自检：OpenSCAD / 模板 / 字体
-.venv313\Scripts\python.exe tools\build.py --zip                   :: 打包 + 便携压缩包
-.venv313\Scripts\python.exe tools\verify_build.py --dist dist\v2.2.8   :: 产物回归
+:: 快速层，秒级
+.venv313\Scripts\python.exe -m pytest --ignore=tests/test_e2e.py
+
+:: 端到端，约 3 分钟（需要 OpenSCAD）
+.venv313\Scripts\python.exe -m pytest tests\test_e2e.py
+
+:: 自检：OpenSCAD / 模板 / 字体
+.venv313\Scripts\python.exe -m stampgen check
+
+:: 打包 + 便携压缩包
+.venv313\Scripts\python.exe tools\build.py --zip
+
+:: 产物回归（换成当次版本目录）
+.venv313\Scripts\python.exe tools\verify_build.py --dist dist\v2.2.8
+
+:: 版本控制（git 在 PATH 里；中文提交信息用 -F 文件更稳）
+git status --short
+git add -A
+git commit -F 说明.txt
 ```
 
 ## 不要做
