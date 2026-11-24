@@ -46,3 +46,6 @@ desktop.ini
 
 # --- 一次性备份（文档治理前，确认后可删） ---
 backup_docs_*/
+
+# Edge/Chrome 预览时误建在项目里的浏览器配置目录（router_dock 下发现）
+.epv5*/
